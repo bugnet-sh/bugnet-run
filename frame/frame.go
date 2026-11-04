@@ -25,6 +25,7 @@ const (
 	ReasonJobNotFound = "job_not_found"
 	ReasonBadArgs     = "bad_args"
 	ReasonSpawnFailed = "spawn_failed"
+	ReasonJobLost     = "job_lost"
 )
 
 // Frame is one line of a bugnet-run stream

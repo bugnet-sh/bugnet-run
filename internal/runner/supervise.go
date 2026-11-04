@@ -18,7 +18,7 @@ const (
 	codeNotFound  = 127
 )
 
-// supervise runs the command and always leaves an exit file so every follower terminates
+// supervise writes the exit file after the command, and spid so followers notice if it dies first
 func supervise(args []string) int {
 	spec, dir, err := parseCommand("supervise", args)
 	if err != nil {
@@ -46,6 +46,9 @@ func runCommand(dir string, spec commandSpec) int {
 		return codeCannotRun
 	}
 	defer func() { _ = errF.Close() }()
+	if err := writePid(filepath.Join(dir, spidFile), os.Getpid()); err != nil {
+		_, _ = fmt.Fprintf(errF, "bugnet-run: %v\n", err)
+	}
 
 	cmd, err := prepare(spec)
 	if err == nil {
@@ -55,14 +58,16 @@ func runCommand(dir string, spec commandSpec) int {
 	}
 	if err != nil {
 		_, _ = fmt.Fprintf(errF, "bugnet-run: %v\n", err)
-		if errors.Is(err, exec.ErrNotFound) || errors.Is(err, fs.ErrNotExist) {
+		// Only a failed lookup is 127, since a vanished cwd is ENOENT as well
+		var lookup *exec.Error
+		if errors.As(err, &lookup) &&
+			(errors.Is(err, exec.ErrNotFound) || errors.Is(err, fs.ErrNotExist)) {
 			return codeNotFound
 		}
 		return codeCannotRun
 	}
 
-	pid := []byte(strconv.Itoa(cmd.Process.Pid) + "\n")
-	if err := writeAtomic(filepath.Join(dir, pidFile), pid); err != nil {
+	if err := writePid(filepath.Join(dir, pidFile), cmd.Process.Pid); err != nil {
 		_, _ = fmt.Fprintf(errF, "bugnet-run: %v\n", err)
 	}
 	err = cmd.Wait()

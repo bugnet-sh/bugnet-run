@@ -213,9 +213,22 @@ func startJob(t *testing.T, dir, id string, env []string, args ...string) *proc 
 	p := launch(t, env, append([]string{"start", "--job", id, "--dir", dir}, args...)...)
 	t.Cleanup(func() {
 		_ = exec.Command(binPath, "cancel", "--job", id, "--dir", dir).Run()
-		waitFor(t, 10*time.Second, func() bool { return exists(filepath.Join(dir, id, "exit")) })
+		waitFor(t, 10*time.Second, func() bool { return ended(dir, id) })
 	})
 	return p
+}
+
+// ended reports whether a job recorded its exit code or lost its supervisor
+func ended(dir, id string) bool {
+	if exists(filepath.Join(dir, id, "exit")) {
+		return true
+	}
+	b, err := os.ReadFile(filepath.Join(dir, id, "spid"))
+	if err != nil {
+		return false
+	}
+	spid, err := strconv.Atoi(strings.TrimSpace(string(b)))
+	return err == nil && spid > 1 && gone(spid)
 }
 
 // cancelJob runs cancel, expects it to succeed silently and returns how long it took
@@ -238,6 +251,27 @@ func runRaw(t *testing.T, args ...string) []byte {
 	return out
 }
 
+type lsLine struct {
+	Job   string `json:"job"`
+	State string `json:"state"`
+	Code  *int   `json:"code"`
+	Out   int64  `json:"o"`
+	Err   int64  `json:"e"`
+}
+
+func listJobs(t *testing.T, dir string) []lsLine {
+	t.Helper()
+	var lines []lsLine
+	for line := range strings.Lines(string(runRaw(t, "ls", "--dir", dir))) {
+		var l lsLine
+		if err := json.Unmarshal([]byte(line), &l); err != nil {
+			t.Fatalf("ls line %q: %v", line, err)
+		}
+		lines = append(lines, l)
+	}
+	return lines
+}
+
 func waitFor(t *testing.T, timeout time.Duration, cond func() bool) {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
@@ -256,7 +290,11 @@ func exists(path string) bool {
 
 func readPid(t *testing.T, dir, id string) int {
 	t.Helper()
-	path := filepath.Join(dir, id, "pid")
+	return readPidFile(t, filepath.Join(dir, id, "pid"))
+}
+
+func readPidFile(t *testing.T, path string) int {
+	t.Helper()
 	waitFor(t, 5*time.Second, func() bool { return exists(path) })
 	b, err := os.ReadFile(path)
 	if err != nil {
@@ -337,6 +375,39 @@ func TestStartAppliesCwdAndEnv(t *testing.T) {
 	}
 }
 
+func TestStartRejectsBadCwd(t *testing.T) {
+	t.Parallel()
+	tmp := t.TempDir()
+	dir, file := filepath.Join(tmp, "jobs"), filepath.Join(tmp, "file")
+	if err := os.WriteFile(file, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, cwd := range []string{filepath.Join(tmp, "missing"), file} {
+		launch(t, nil, "start", "--job", "cwd", "--dir", dir, "--cwd", cwd, "--", "true").
+			collect(t, 0, 0).mustFail(t, frame.ReasonBadArgs, 2)
+		if exists(filepath.Join(dir, "cwd")) {
+			t.Fatalf("start with --cwd %s created a job directory", cwd)
+		}
+	}
+}
+
+func TestSuperviseReportsVanishedCwd(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	if err := os.Mkdir(filepath.Join(dir, "vanished"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cwd := filepath.Join(dir, "missing")
+	runRaw(t, "supervise", "--job", "vanished", "--dir", dir, "--cwd", cwd, "--", "true")
+	b, err := os.ReadFile(filepath.Join(dir, "vanished", "exit"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code := strings.TrimSpace(string(b)); code != "126" {
+		t.Errorf("exit code %s, want 126 so it differs from a missing command", code)
+	}
+}
+
 func TestStartCommandNotFound(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
@@ -359,26 +430,31 @@ func TestStartStreamsCarriageReturnAndBinary(t *testing.T) {
 	if err := os.WriteFile(bin, allBytes(), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	script := `read x < "$1"; printf '10%%\r'; read x < "$1"; printf '50%%\r100%%\r'; cat "$2"`
+	script := `for p in 10 50 90 100; do read x < "$1"; printf '%s%%\r' "$p"; done
+		read x < "$1"; cat "$2"`
 	p := startJob(t, dir, "progress", nil, "--", "sh", "-c", script, "sh", gate, bin)
 
-	// Lets the follower back off to its idle poll before the command writes
-	time.Sleep(500 * time.Millisecond)
-	written := openGate(t, gate)
-	first := p.next(t, 5*time.Second)
-	if latency := time.Since(written); latency > 200*time.Millisecond {
-		t.Errorf("first chunk arrived %v after it was written, want under 200ms", latency)
-	}
-	if first.Kind != frame.KindStdout || string(first.Data) != "10%\r" {
-		t.Fatalf("first frame %+v, want stdout %q", first, "10%\r")
+	// Each silence ends at a different point of the idle poll cycle, so a slow poll cannot hide
+	var off int64
+	for i, silence := range []time.Duration{300, 330, 370, 410} {
+		time.Sleep(silence * time.Millisecond)
+		written := openGate(t, gate)
+		f := p.next(t, 5*time.Second)
+		if latency := time.Since(written); latency > 200*time.Millisecond {
+			t.Errorf("chunk %d arrived %v after it was written, want under 200ms", i, latency)
+		}
+		want := []string{"10%\r", "50%\r", "90%\r", "100%\r"}[i]
+		if f.Kind != frame.KindStdout || f.Offset != off || string(f.Data) != want {
+			t.Fatalf("frame %+v, want stdout %q at offset %d", f, want, off)
+		}
+		off += int64(len(f.Data))
 	}
 
 	openGate(t, gate)
-	res := p.collect(t, int64(len(first.Data)), 0)
+	res := p.collect(t, off, 0)
 	res.mustExit(t)
-	want := append([]byte("50%\r100%\r"), allBytes()...)
-	if !bytes.Equal(res.stdout, want) {
-		t.Errorf("stdout %q, want %q", res.stdout, want)
+	if !bytes.Equal(res.stdout, allBytes()) {
+		t.Errorf("stdout %q, want bytes 0x00 to 0xff", res.stdout)
 	}
 }
 
@@ -510,6 +586,69 @@ func TestCommandSurvivesFollowerKill(t *testing.T) {
 	}
 }
 
+func TestFollowEndsDespiteBackgroundWriter(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	began := time.Now()
+	res := startJob(t, dir, "chatty", nil, "--", "sh", "-c", "(while :; do echo y; done) & exit 0").
+		collect(t, 0, 0)
+	if x := res.mustExit(t); x.Code != 0 {
+		t.Errorf("exit code %d, want 0", x.Code)
+	}
+	if elapsed := time.Since(began); elapsed > 5*time.Second {
+		t.Errorf("start followed for %v after the command exited", elapsed)
+	}
+
+	began = time.Now()
+	again := launch(t, nil, "attach", "--job", "chatty", "--out", "0", "--err", "0", "--dir", dir).
+		collect(t, 0, 0)
+	again.mustExit(t)
+	if elapsed := time.Since(began); elapsed > 5*time.Second {
+		t.Errorf("attach followed for %v after the command exited", elapsed)
+	}
+	if !bytes.HasPrefix(again.stdout, res.stdout) {
+		t.Error("attach from 0 does not repeat what start streamed")
+	}
+
+	pgid := readPid(t, dir, "chatty")
+	cancelJob(t, dir, "chatty")
+	waitFor(t, 2*time.Second, func() bool { return gone(-pgid) })
+}
+
+func TestSupervisorDeathReportsJobLost(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	p := startJob(t, dir, "lost", nil, "--", "sh", "-c", "echo ready; sleep 100")
+	if line := p.nextLine(t); line != "ready" {
+		t.Fatalf("first line %q, want %q", line, "ready")
+	}
+	pgid := readPid(t, dir, "lost")
+	spid := readPidFile(t, filepath.Join(dir, "lost", "spid"))
+	if err := syscall.Kill(spid, syscall.SIGKILL); err != nil {
+		t.Fatal(err)
+	}
+
+	p.collect(t, 6, 0).mustFail(t, frame.ReasonJobLost, 5)
+	res := launch(t, nil, "attach", "--job", "lost", "--out", "0", "--err", "0", "--dir", dir).
+		collect(t, 0, 0)
+	want := []frame.Frame{
+		{Kind: frame.KindStdout, Data: []byte("ready\n")},
+		{Kind: frame.KindError, Reason: frame.ReasonJobLost},
+	}
+	if !reflect.DeepEqual(res.frames, want) || res.code != 5 {
+		t.Errorf("attach frames %+v status %d, want %+v and 5", res.frames, res.code, want)
+	}
+	if got := listJobs(t, dir); len(got) != 1 || got[0].State != "lost" {
+		t.Errorf("ls %+v, want one lost job", got)
+	}
+
+	if gone(-pgid) {
+		t.Fatal("the command died with its supervisor")
+	}
+	cancelJob(t, dir, "lost")
+	waitFor(t, 2*time.Second, func() bool { return gone(-pgid) })
+}
+
 func TestUnknownJob(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
@@ -559,6 +698,53 @@ func TestCancelEscalatesToKill(t *testing.T) {
 	waitFor(t, 2*time.Second, func() bool { return gone(-pgid) })
 }
 
+func TestCancelKillsGroupAfterExit(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	res := startJob(t, dir, "orphan", nil, "--", "sh", "-c", "sleep 100 & echo $!").
+		collect(t, 0, 0)
+	if x := res.mustExit(t); x.Code != 0 {
+		t.Errorf("exit code %d, want 0", x.Code)
+	}
+	child, err := strconv.Atoi(strings.TrimSpace(string(res.stdout)))
+	if err != nil {
+		t.Fatalf("child pid %q: %v", res.stdout, err)
+	}
+	pgid := readPid(t, dir, "orphan")
+	if gone(child) {
+		t.Fatal("background child ended with the command")
+	}
+
+	if elapsed := cancelJob(t, dir, "orphan"); elapsed >= 5*time.Second {
+		t.Errorf("cancel took %v, SIGTERM alone should end the child", elapsed)
+	}
+	waitFor(t, 2*time.Second, func() bool { return gone(child) && gone(-pgid) })
+	if elapsed := cancelJob(t, dir, "orphan"); elapsed >= time.Second {
+		t.Errorf("cancel of an empty group took %v", elapsed)
+	}
+}
+
+func TestCancelRefusesTamperedPid(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	startJob(t, dir, "tampered", nil, "--", "sleep", "100")
+	pid := readPid(t, dir, "tampered")
+	path := filepath.Join(dir, "tampered", "pid")
+	t.Cleanup(func() { _ = os.WriteFile(path, []byte(strconv.Itoa(pid)+"\n"), 0o600) })
+
+	// Values that would reach kill as 0 or -1 are covered by TestParsePid without signalling
+	for _, bad := range []string{"garbage\n", "+" + strconv.Itoa(pid), strconv.Itoa(pid) + " 9"} {
+		if err := os.WriteFile(path, []byte(bad), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		launch(t, nil, "cancel", "--job", "tampered", "--dir", dir).collect(t, 0, 0).
+			mustFail(t, frame.ReasonBadArgs, 2)
+		if gone(pid) {
+			t.Fatalf("cancel with pid file %q signalled the job", bad)
+		}
+	}
+}
+
 /* Ls, ping and arguments */
 
 func TestLsReportsJobs(t *testing.T) {
@@ -567,28 +753,14 @@ func TestLsReportsJobs(t *testing.T) {
 	startJob(t, dir, "a-done", nil, "--", "sh", "-c", "echo a; echo b >&2; exit 3").
 		collect(t, 0, 0).mustExit(t)
 	startJob(t, dir, "b-live", nil, "--", "sleep", "100")
+	readPid(t, dir, "b-live")
 
-	type status struct {
-		Job   string `json:"job"`
-		State string `json:"state"`
-		Code  *int   `json:"code"`
-		Out   int64  `json:"o"`
-		Err   int64  `json:"e"`
-	}
-	var got []status
-	for line := range strings.Lines(string(runRaw(t, "ls", "--dir", dir))) {
-		var s status
-		if err := json.Unmarshal([]byte(line), &s); err != nil {
-			t.Fatalf("ls line %q: %v", line, err)
-		}
-		got = append(got, s)
-	}
 	three := 3
-	want := []status{
+	want := []lsLine{
 		{Job: "a-done", State: "exited", Code: &three, Out: 2, Err: 2},
 		{Job: "b-live", State: "running"},
 	}
-	if !reflect.DeepEqual(got, want) {
+	if got := listJobs(t, dir); !reflect.DeepEqual(got, want) {
 		t.Errorf("ls %+v, want %+v", got, want)
 	}
 }

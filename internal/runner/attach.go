@@ -21,49 +21,57 @@ const (
 )
 
 func attach(args []string, stdout, stderr io.Writer) int {
-	var job jobFlags
-	var outOff, errOff int64
+	var outOff, errOff offsetFlag
 	flags := newFlags("attach")
-	job.register(flags)
-	flags.Int64Var(&outOff, "out", 0, "stdout offset to resume from")
-	flags.Int64Var(&errOff, "err", 0, "stderr offset to resume from")
-	if err := flags.Parse(args); err != nil {
-		return badArgs(stdout, stderr, err)
-	}
-	if flags.NArg() > 0 {
-		return badArgs(stdout, stderr, fmt.Errorf("unexpected argument %q", flags.Arg(0)))
-	}
-	dir, err := job.path()
-	if err != nil {
-		return badArgs(stdout, stderr, err)
-	}
-	if outOff < 0 || errOff < 0 {
-		err := fmt.Errorf("negative offset in --out %d --err %d", outOff, errOff)
-		return badArgs(stdout, stderr, err)
-	}
-	if _, err := os.Stat(dir); errors.Is(err, fs.ErrNotExist) {
-		return fail(stdout, stderr, frame.ReasonJobNotFound, exitJobNotFound, nil)
-	} else if err != nil {
-		return failed(stderr, err)
+	flags.Var(&outOff, "out", "stdout offset to resume from")
+	flags.Var(&errOff, "err", "stderr offset to resume from")
+	dir, status := lookupJob(flags, args, stdout, stderr)
+	if status != exitOK {
+		return status
 	}
 	for _, o := range []struct {
 		name string
-		off  int64
+		off  offsetFlag
 	}{{outFile, outOff}, {errFile, errOff}} {
 		size, err := fileSize(filepath.Join(dir, o.name))
 		if err != nil {
 			return failed(stderr, err)
 		}
-		if o.off > size {
+		if int64(o.off) > size {
 			err := fmt.Errorf("%s offset %d beyond its %d bytes", o.name, o.off, size)
 			return badArgs(stdout, stderr, err)
 		}
 	}
-	return followJob(stdout, stderr, dir, outOff, errOff)
+	return followJob(stdout, stderr, dir, int64(outOff), int64(errOff))
 }
 
+// offsetFlag refuses negative offsets while parsing, before the job is looked up
+type offsetFlag int64
+
+func (o *offsetFlag) String() string {
+	return strconv.FormatInt(int64(*o), 10)
+}
+
+func (o *offsetFlag) Set(s string) error {
+	n, err := strconv.ParseInt(s, 10, 64)
+	if err != nil {
+		return err
+	}
+	if n < 0 {
+		return fmt.Errorf("negative offset %d", n)
+	}
+	*o = offsetFlag(n)
+	return nil
+}
+
+var errJobLost = errors.New("job supervisor died without recording an exit code")
+
 func followJob(stdout, stderr io.Writer, dir string, outOff, errOff int64) int {
-	if err := follow(stdout, dir, outOff, errOff, heartbeatInterval()); err != nil {
+	err := follow(stdout, dir, outOff, errOff, heartbeatInterval())
+	if errors.Is(err, errJobLost) {
+		return fail(stdout, stderr, frame.ReasonJobLost, exitJobLost, err)
+	}
+	if err != nil {
 		return failed(stderr, err)
 	}
 	return exitOK
@@ -77,16 +85,19 @@ func heartbeatInterval() time.Duration {
 	return time.Duration(ms) * time.Millisecond
 }
 
-// output tails one append-only output file of a job
 type output struct {
 	kind frame.Kind
 	path string
 	off  int64
+	end  int64
 	file *os.File
 }
 
-// read returns the bytes after off, none while the supervisor has not created the file
+// read returns the next bytes before end, none while the supervisor has not created the file
 func (o *output) read(buf []byte) (int, error) {
+	if o.off >= o.end {
+		return 0, nil
+	}
 	if o.file == nil {
 		f, err := os.Open(o.path)
 		if errors.Is(err, fs.ErrNotExist) {
@@ -97,14 +108,14 @@ func (o *output) read(buf []byte) (int, error) {
 		}
 		o.file = f
 	}
-	n, err := o.file.ReadAt(buf, o.off)
+	n, err := o.file.ReadAt(buf[:min(int64(len(buf)), o.end-o.off)], o.off)
 	if errors.Is(err, io.EOF) {
 		err = nil
 	}
 	return n, err
 }
 
-// follow streams both outputs until the exit file exists and both are drained
+// follow streams both outputs until the job exits, or returns errJobLost if its supervisor died
 func follow(w io.Writer, dir string, outOff, errOff int64, heartbeat time.Duration) error {
 	stdout := &output{kind: frame.KindStdout, path: filepath.Join(dir, outFile), off: outOff}
 	stderr := &output{kind: frame.KindStderr, path: filepath.Join(dir, errFile), off: errOff}
@@ -121,19 +132,27 @@ func follow(w io.Writer, dir string, outOff, errOff int64, heartbeat time.Durati
 	delay := fastPoll
 	lastFrame := time.Now()
 	for {
-		// The exit file is checked before draining so output written before it is never missed
-		code, exited, err := readExit(dir)
+		state, code, err := jobState(dir)
 		if err != nil {
 			return err
+		}
+		// Sized after the state check so a pass covers the command yet ends despite later writers
+		for _, o := range outs {
+			if o.end, err = fileSize(o.path); err != nil {
+				return err
+			}
 		}
 		flowed, err := drain(w, outs, buf)
 		if err != nil {
 			return err
 		}
-		if exited {
+		switch state {
+		case stateExited:
 			return frame.Encode(w, frame.Frame{
 				Kind: frame.KindExit, Code: code, Out: stdout.off, Err: stderr.off,
 			})
+		case stateLost:
+			return errJobLost
 		}
 		if flowed {
 			lastFrame, delay = time.Now(), fastPoll
@@ -152,7 +171,7 @@ func follow(w io.Writer, dir string, outOff, errOff int64, heartbeat time.Durati
 	}
 }
 
-// drain emits everything available, one chunk per output in turn so neither starves
+// drain emits everything up to each end, one chunk per output in turn so neither starves
 func drain(w io.Writer, outs []*output, buf []byte) (bool, error) {
 	flowed := false
 	for {

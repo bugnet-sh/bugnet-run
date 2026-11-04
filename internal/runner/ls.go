@@ -3,7 +3,6 @@ package runner
 import (
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"io/fs"
 	"os"
@@ -23,11 +22,8 @@ func ls(args []string, stdout, stderr io.Writer) int {
 	var dir string
 	flags := newFlags("ls")
 	flags.StringVar(&dir, "dir", defaultDir, "directory holding one directory per job")
-	if err := flags.Parse(args); err != nil {
+	if err := parseFlags(flags, args); err != nil {
 		return badArgs(stdout, stderr, err)
-	}
-	if flags.NArg() > 0 {
-		return badArgs(stdout, stderr, fmt.Errorf("unexpected argument %q", flags.Arg(0)))
 	}
 	entries, err := os.ReadDir(dir)
 	if errors.Is(err, fs.ErrNotExist) {
@@ -54,13 +50,13 @@ func ls(args []string, stdout, stderr io.Writer) int {
 }
 
 func statusOf(dir string) (jobStatus, error) {
-	status := jobStatus{State: "running"}
-	code, exited, err := readExit(dir)
+	state, code, err := jobState(dir)
 	if err != nil {
-		return status, err
+		return jobStatus{}, err
 	}
-	if exited {
-		status.State, status.Code = "exited", &code
+	status := jobStatus{State: state}
+	if state == stateExited {
+		status.Code = &code
 	}
 	if status.Out, err = fileSize(filepath.Join(dir, outFile)); err != nil {
 		return status, err

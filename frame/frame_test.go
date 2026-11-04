@@ -33,6 +33,7 @@ func sampleFrames() []frame.Frame {
 		{Kind: frame.KindError, Reason: frame.ReasonJobNotFound},
 		{Kind: frame.KindError, Reason: frame.ReasonBadArgs},
 		{Kind: frame.KindError, Reason: frame.ReasonSpawnFailed},
+		{Kind: frame.KindError, Reason: frame.ReasonJobLost},
 		{Kind: frame.KindPong},
 	}
 }

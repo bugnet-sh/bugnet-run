@@ -2,17 +2,18 @@ package runner
 
 import (
 	"errors"
+	"fmt"
 	"io"
 	"io/fs"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"syscall"
 
 	"github.com/oynozan/bugnet-run/frame"
 )
 
-// commandSpec is what start parses and hands on to supervise
 type commandSpec struct {
 	job  jobFlags
 	cwd  string
@@ -39,6 +40,9 @@ func parseCommand(name string, args []string) (commandSpec, string, error) {
 
 func start(args []string, stdout, stderr io.Writer) int {
 	spec, dir, err := parseCommand("start", args)
+	if err == nil && spec.cwd != "" {
+		spec.cwd, err = workDir(spec.cwd)
+	}
 	if err != nil {
 		return badArgs(stdout, stderr, err)
 	}
@@ -56,6 +60,22 @@ func start(args []string, stdout, stderr io.Writer) int {
 		return fail(stdout, stderr, frame.ReasonSpawnFailed, exitSpawnFailed, err)
 	}
 	return followJob(stdout, stderr, dir, 0, 0)
+}
+
+// workDir resolves cwd so the supervisor enters the same directory start checked
+func workDir(cwd string) (string, error) {
+	abs, err := filepath.Abs(cwd)
+	if err != nil {
+		return "", err
+	}
+	info, err := os.Stat(abs)
+	if err != nil {
+		return "", err
+	}
+	if !info.IsDir() {
+		return "", fmt.Errorf("cwd %s is not a directory", abs)
+	}
+	return abs, nil
 }
 
 // spawnSupervisor starts supervise in its own session with stdio on /dev/null

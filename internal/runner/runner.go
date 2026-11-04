@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 
 	"github.com/oynozan/bugnet-run/frame"
 )
@@ -25,6 +26,7 @@ const (
 	exitJobExists   = 3
 	exitJobNotFound = 4
 	exitSpawnFailed = 5
+	exitJobLost     = 5
 )
 
 // Files inside a job directory
@@ -32,7 +34,15 @@ const (
 	outFile  = "out"
 	errFile  = "err"
 	pidFile  = "pid"
+	spidFile = "spid"
 	exitFile = "exit"
+)
+
+// Job states as ls reports them
+const (
+	stateRunning = "running"
+	stateExited  = "exited"
+	stateLost    = "lost"
 )
 
 // Run executes the subcommand named by args[0] and returns the process exit status
@@ -89,6 +99,35 @@ func newFlags(name string) *flag.FlagSet {
 	return flags
 }
 
+func parseFlags(flags *flag.FlagSet, args []string) error {
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if flags.NArg() > 0 {
+		return fmt.Errorf("unexpected argument %q", flags.Arg(0))
+	}
+	return nil
+}
+
+// lookupJob parses flags naming an existing job and returns its directory or the status it reported
+func lookupJob(flags *flag.FlagSet, args []string, stdout, stderr io.Writer) (string, int) {
+	var job jobFlags
+	job.register(flags)
+	if err := parseFlags(flags, args); err != nil {
+		return "", badArgs(stdout, stderr, err)
+	}
+	dir, err := job.path()
+	if err != nil {
+		return "", badArgs(stdout, stderr, err)
+	}
+	if _, err := os.Stat(dir); errors.Is(err, fs.ErrNotExist) {
+		return "", fail(stdout, stderr, frame.ReasonJobNotFound, exitJobNotFound, nil)
+	} else if err != nil {
+		return "", failed(stderr, err)
+	}
+	return dir, exitOK
+}
+
 type jobFlags struct {
 	id  string
 	dir string
@@ -137,7 +176,31 @@ func (e *envFlag) Set(kv string) error {
 
 /* Job files */
 
-// readExit returns the job's exit code once its exit file exists
+// jobState checks the supervisor before the exit file so one exiting cleanly meanwhile is not lost
+func jobState(dir string) (string, int, error) {
+	lost := supervisorGone(dir)
+	code, exited, err := readExit(dir)
+	switch {
+	case err != nil:
+		return "", 0, err
+	case exited:
+		return stateExited, code, nil
+	case lost:
+		return stateLost, 0, nil
+	}
+	return stateRunning, 0, nil
+}
+
+// supervisorGone stays false until spid holds a valid pid, since only a known pid can be checked
+func supervisorGone(dir string) bool {
+	b, err := os.ReadFile(filepath.Join(dir, spidFile))
+	if err != nil {
+		return false
+	}
+	spid, err := parsePid(b)
+	return err == nil && errors.Is(syscall.Kill(spid, 0), syscall.ESRCH)
+}
+
 func readExit(dir string) (code int, exited bool, err error) {
 	b, err := os.ReadFile(filepath.Join(dir, exitFile))
 	if errors.Is(err, fs.ErrNotExist) {
@@ -153,6 +216,26 @@ func readExit(dir string) (code int, exited bool, err error) {
 	return code, true, nil
 }
 
+var errBadPid = errors.New("invalid pid")
+
+// parsePid accepts only plain decimals above 1 that fit a pid, so kill never sees 0 or -1
+func parsePid(b []byte) (int, error) {
+	s := strings.TrimSpace(string(b))
+	if s == "" || strings.TrimLeft(s, "0123456789") != "" {
+		return 0, fmt.Errorf("%w %q", errBadPid, s)
+	}
+	pid, err := strconv.ParseInt(s, 10, 32)
+	if err != nil || pid <= 1 {
+		return 0, fmt.Errorf("%w %q", errBadPid, s)
+	}
+	return int(pid), nil
+}
+
+func exists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
+}
+
 // fileSize returns zero for an output file the supervisor has not created yet
 func fileSize(path string) (int64, error) {
 	info, err := os.Stat(path)
@@ -163,6 +246,10 @@ func fileSize(path string) (int64, error) {
 		return 0, err
 	}
 	return info.Size(), nil
+}
+
+func writePid(path string, pid int) error {
+	return writeAtomic(path, []byte(strconv.Itoa(pid)+"\n"))
 }
 
 // writeAtomic renames a finished temp file into place so readers never see a partial write
