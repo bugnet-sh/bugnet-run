@@ -1,18 +1,16 @@
 .PHONY: test lint build
 
-PKGS := $(shell go list ./... 2>/dev/null)
+ARCHS := amd64 arm64
 
 test:
-ifneq ($(PKGS),)
 	go test -race ./...
-endif
 
 lint:
-ifneq ($(PKGS),)
 	golangci-lint run ./...
-endif
 
 build:
-ifneq ($(PKGS),)
 	go build ./...
-endif
+	for arch in $(ARCHS); do \
+		GOOS=linux GOARCH=$$arch CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' \
+			-o dist/bugnet-run-linux-$$arch ./cmd/bugnet-run || exit 1; \
+	done
