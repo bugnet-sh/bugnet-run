@@ -17,6 +17,8 @@ const (
 	KindExit      Kind = "x"
 	KindError     Kind = "err"
 	KindPong      Kind = "pong"
+	// KindSkip says output goes on at offsets Out and Err, the bytes before them left in the files
+	KindSkip Kind = "skip"
 )
 
 // Reasons carried by error frames

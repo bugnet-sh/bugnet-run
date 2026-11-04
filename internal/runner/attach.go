@@ -18,13 +18,16 @@ const (
 	fastPoll         = 5 * time.Millisecond
 	slowPoll         = 50 * time.Millisecond
 	defaultHeartbeat = 10 * time.Second
+	// tailPoll paces a tail follower, which sends at most its tail per stream each time
+	tailPoll = time.Second
 )
 
 func attach(args []string, stdout, stderr io.Writer) int {
-	var outOff, errOff offsetFlag
+	var outOff, errOff, tail offsetFlag
 	flags := newFlags("attach")
 	flags.Var(&outOff, "out", "stdout offset to resume from")
 	flags.Var(&errOff, "err", "stderr offset to resume from")
+	flags.Var(&tail, "tail", "follow only the newest bytes of each output, skipping the rest")
 	dir, status := lookupJob(flags, args, stdout, stderr)
 	if status != exitOK {
 		return status
@@ -42,7 +45,7 @@ func attach(args []string, stdout, stderr io.Writer) int {
 			return badArgs(stdout, stderr, err)
 		}
 	}
-	return followJob(stdout, stderr, dir, int64(outOff), int64(errOff))
+	return followJob(stdout, stderr, dir, int64(outOff), int64(errOff), int64(tail))
 }
 
 // offsetFlag refuses negative offsets while parsing, before the job is looked up
@@ -66,8 +69,8 @@ func (o *offsetFlag) Set(s string) error {
 
 var errJobLost = errors.New("job supervisor died without recording an exit code")
 
-func followJob(stdout, stderr io.Writer, dir string, outOff, errOff int64) int {
-	err := follow(stdout, dir, outOff, errOff, heartbeatInterval())
+func followJob(stdout, stderr io.Writer, dir string, outOff, errOff, tail int64) int {
+	err := follow(stdout, dir, outOff, errOff, heartbeatInterval(), tail)
 	if errors.Is(err, errJobLost) {
 		return fail(stdout, stderr, frame.ReasonJobLost, exitJobLost, err)
 	}
@@ -115,8 +118,10 @@ func (o *output) read(buf []byte) (int, error) {
 	return n, err
 }
 
-// follow streams both outputs until the job exits, or returns errJobLost if its supervisor died
-func follow(w io.Writer, dir string, outOff, errOff int64, heartbeat time.Duration) error {
+// follow streams both outputs until the job exits or is lost, each only its newest tail when set
+func follow(
+	w io.Writer, dir string, outOff, errOff int64, heartbeat time.Duration, tail int64,
+) error {
 	stdout := &output{kind: frame.KindStdout, path: filepath.Join(dir, outFile), off: outOff}
 	stderr := &output{kind: frame.KindStderr, path: filepath.Join(dir, errFile), off: errOff}
 	outs := []*output{stdout, stderr}
@@ -142,6 +147,12 @@ func follow(w io.Writer, dir string, outOff, errOff int64, heartbeat time.Durati
 				return err
 			}
 		}
+		if tail > 0 && skipAhead(outs, tail) {
+			skip := frame.Frame{Kind: frame.KindSkip, Out: stdout.off, Err: stderr.off}
+			if err := frame.Encode(w, skip); err != nil {
+				return err
+			}
+		}
 		flowed, err := drain(w, outs, buf)
 		if err != nil {
 			return err
@@ -164,11 +175,26 @@ func follow(w io.Writer, dir string, outOff, errOff int64, heartbeat time.Durati
 			}
 			lastFrame = time.Now()
 		}
-		time.Sleep(min(delay, time.Until(lastFrame.Add(heartbeat))))
+		pause := delay
+		if tail > 0 {
+			pause = tailPoll
+		}
+		time.Sleep(min(pause, time.Until(lastFrame.Add(heartbeat))))
 		if !flowed {
 			delay = min(delay*2, slowPoll)
 		}
 	}
+}
+
+// skipAhead moves every output more than tail bytes behind its end to tail bytes before it
+func skipAhead(outs []*output, tail int64) bool {
+	moved := false
+	for _, o := range outs {
+		if o.end-o.off > tail {
+			o.off, moved = o.end-tail, true
+		}
+	}
+	return moved
 }
 
 // drain emits everything up to each end, one chunk per output in turn so neither starves

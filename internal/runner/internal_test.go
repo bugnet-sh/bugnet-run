@@ -89,7 +89,7 @@ func TestFollowStopsAtSizesSeenAtEnd(t *testing.T) {
 			defer func() { _ = out.Close() }()
 
 			c := &chaser{out: out}
-			if err := follow(c, dir, 0, 0, time.Hour); !errors.Is(err, tc.err) {
+			if err := follow(c, dir, 0, 0, time.Hour, 0); !errors.Is(err, tc.err) {
 				t.Fatalf("follow returned %v, want %v", err, tc.err)
 			}
 			if !reflect.DeepEqual(c.frames, tc.frames) {

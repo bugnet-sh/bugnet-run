@@ -35,6 +35,7 @@ func sampleFrames() []frame.Frame {
 		{Kind: frame.KindError, Reason: frame.ReasonSpawnFailed},
 		{Kind: frame.KindError, Reason: frame.ReasonJobLost},
 		{Kind: frame.KindPong},
+		{Kind: frame.KindSkip, Out: 1 << 33, Err: 7},
 	}
 }
 

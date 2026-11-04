@@ -59,7 +59,7 @@ func start(args []string, stdout, stderr io.Writer) int {
 		_ = os.RemoveAll(dir)
 		return fail(stdout, stderr, frame.ReasonSpawnFailed, exitSpawnFailed, err)
 	}
-	return followJob(stdout, stderr, dir, 0, 0)
+	return followJob(stdout, stderr, dir, 0, 0, 0)
 }
 
 // workDir resolves cwd so the supervisor enters the same directory start checked

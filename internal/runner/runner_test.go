@@ -561,6 +561,47 @@ func TestAttachFromOffsets(t *testing.T) {
 		collect(t, 0, 0).mustFail(t, frame.ReasonBadArgs, 2)
 }
 
+func TestAttachTailSkipsToTheNewestBytes(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	script := "head -c 300000 /dev/zero; head -c 200000 /dev/zero >&2; sleep 1; printf end"
+	startJob(t, dir, "flood", nil, "--", "sh", "-c", script).collect(t, 0, 0).mustExit(t)
+	p := launch(t, nil, "attach", "--job", "flood", "--out", "1000", "--err", "0", "--tail",
+		"4096", "--dir", dir)
+	var out, errOut, skips int64
+	next := [2]int64{1000, 0}
+	for {
+		f := p.next(t, 10*time.Second)
+		switch f.Kind {
+		case frame.KindSkip:
+			skips++
+			if f.Out < next[0] || f.Err < next[1] {
+				t.Fatalf("skip frame %+v goes back from %v", f, next)
+			}
+			next = [2]int64{f.Out, f.Err}
+		case frame.KindStdout, frame.KindStderr:
+			i, n := 0, &out
+			if f.Kind == frame.KindStderr {
+				i, n = 1, &errOut
+			}
+			if f.Offset != next[i] {
+				t.Fatalf("%s frame at %d, want %d after the last skip", f.Kind, f.Offset, next[i])
+			}
+			next[i] += int64(len(f.Data))
+			*n += int64(len(f.Data))
+		case frame.KindExit:
+			if skips != 1 || f.Out != 300003 || f.Err != 200000 || next != [2]int64{f.Out, f.Err} {
+				t.Fatalf("exit %+v after %d skips at %v, want one skip and the files' sizes", f,
+					skips, next)
+			}
+			if out != 4096 || errOut != 4096 {
+				t.Fatalf("tail sent %d stdout and %d stderr bytes, want 4096 each", out, errOut)
+			}
+			return
+		}
+	}
+}
+
 func TestCommandSurvivesFollowerKill(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
