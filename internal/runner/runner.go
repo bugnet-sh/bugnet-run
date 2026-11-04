@@ -178,7 +178,7 @@ func (e *envFlag) Set(kv string) error {
 
 // jobState checks the supervisor before the exit file so one exiting cleanly meanwhile is not lost
 func jobState(dir string) (string, int, error) {
-	lost := supervisorGone(dir)
+	lost := supervisorGone(dir) || removed(dir)
 	code, exited, err := readExit(dir)
 	switch {
 	case err != nil:
@@ -189,6 +189,12 @@ func jobState(dir string) (string, int, error) {
 		return stateLost, 0, nil
 	}
 	return stateRunning, 0, nil
+}
+
+// removed reports a job directory deleted under a follower, as when its sandbox is destroyed
+func removed(dir string) bool {
+	_, err := os.Stat(dir)
+	return errors.Is(err, fs.ErrNotExist)
 }
 
 // supervisorGone stays false until spid holds a valid pid, since only a known pid can be checked

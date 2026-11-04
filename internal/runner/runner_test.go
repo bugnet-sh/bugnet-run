@@ -218,9 +218,9 @@ func startJob(t *testing.T, dir, id string, env []string, args ...string) *proc 
 	return p
 }
 
-// ended reports whether a job recorded its exit code or lost its supervisor
+// ended reports whether a job recorded its exit code, lost its supervisor or was removed
 func ended(dir, id string) bool {
-	if exists(filepath.Join(dir, id, "exit")) {
+	if !exists(filepath.Join(dir, id)) || exists(filepath.Join(dir, id, "exit")) {
 		return true
 	}
 	b, err := os.ReadFile(filepath.Join(dir, id, "spid"))
@@ -647,6 +647,26 @@ func TestSupervisorDeathReportsJobLost(t *testing.T) {
 	}
 	cancelJob(t, dir, "lost")
 	waitFor(t, 2*time.Second, func() bool { return gone(-pgid) })
+}
+
+func TestRemovedJobDirReportsJobLost(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	p := startJob(t, dir, "removed", nil, "--", "sh", "-c", "echo ready; sleep 100")
+	if line := p.nextLine(t); line != "ready" {
+		t.Fatalf("first line %q, want %q", line, "ready")
+	}
+	pgid := readPid(t, dir, "removed")
+	spid := readPidFile(t, filepath.Join(dir, "removed", "spid"))
+	t.Cleanup(func() {
+		_ = syscall.Kill(-pgid, syscall.SIGKILL)
+		_ = syscall.Kill(spid, syscall.SIGKILL)
+	})
+	if err := os.RemoveAll(filepath.Join(dir, "removed")); err != nil {
+		t.Fatal(err)
+	}
+
+	p.collect(t, 6, 0).mustFail(t, frame.ReasonJobLost, 5)
 }
 
 func TestUnknownJob(t *testing.T) {
