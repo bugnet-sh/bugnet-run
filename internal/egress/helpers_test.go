@@ -12,6 +12,7 @@ import (
 	"crypto/x509/pkix"
 	"encoding/base64"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"io"
@@ -159,12 +160,7 @@ func newPKI(t *testing.T) *pki {
 	must(t, err)
 	cert, err := x509.ParseCertificate(der)
 	must(t, err)
-	return &pki{pem: pem(der), cert: cert, key: key}
-}
-
-func pem(der []byte) []byte {
-	return []byte("-----BEGIN CERTIFICATE-----\n" + base64.StdEncoding.EncodeToString(der) +
-		"\n-----END CERTIFICATE-----\n")
+	return &pki{pem: certPEM(der), cert: cert, key: key}
 }
 
 // leaf returns a server certificate for name signed by the CA
@@ -182,6 +178,10 @@ func (p *pki) leaf(t *testing.T, name string) tls.Certificate {
 	der, err := x509.CreateCertificate(rand.Reader, tmpl, p.cert, &key.PublicKey, p.key)
 	must(t, err)
 	return tls.Certificate{Certificate: [][]byte{der}, PrivateKey: key}
+}
+
+func certPEM(der []byte) []byte {
+	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
 }
 
 /* Tunnel server */
