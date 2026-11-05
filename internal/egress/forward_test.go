@@ -31,6 +31,20 @@ func loadConfig(t *testing.T, root sandbox.Root, change func(*Config)) error {
 	return err
 }
 
+func TestWireNames(t *testing.T) {
+	t.Parallel()
+	eq(t, []string{ListenIP, TunnelPath, ProtocolTunnel}, []string{
+		"127.77.0.1", "/v1/tunnel", "bugnet-tunnel.v1",
+	})
+	eq(t, MaxConns, 64)
+	eq(t, []time.Duration{firstRetry, listenWait, handshakeTimeout}, []time.Duration{
+		time.Second, 5 * time.Second, 10 * time.Second,
+	})
+	eq(t, []string{ErrBadSpec, ErrPort443Taken, ErrTokenMissing, ErrApplyFailed}, []string{
+		"bad_spec", "port_443_taken", "token_missing", "apply_failed",
+	})
+}
+
 func TestForwardRefusesLoopbackListen(t *testing.T) {
 	t.Parallel()
 	for _, a := range []string{"127.0.0.1:443", "[::1]:443", "0.0.0.0:443", ":443",
