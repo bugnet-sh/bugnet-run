@@ -380,6 +380,24 @@ func TestApplyBadSpec(t *testing.T) {
 	}
 }
 
+func TestApplyDeletesTheSpecWhateverElseIsWrong(t *testing.T) {
+	t.Parallel()
+	good, err := json.Marshal(spec("huggingface.co"))
+	must(t, err)
+	for _, rest := range [][]string{{"--nope"}, {"extra"}, {"--root", "relative"}} {
+		path := filepath.Join(t.TempDir(), "egress-spec.json")
+		must(t, os.WriteFile(path, good, 0o600))
+		var out, errOut bytes.Buffer
+		code := Apply(append([]string{"--spec", path}, rest...), &out, &errOut)
+		if strings.TrimSpace(out.String()) != `{"error":"bad_spec"}` || code != 1 {
+			t.Errorf("apply --spec %v: printed %q and exited %d", rest, out.String(), code)
+		}
+		if exists(path) {
+			t.Errorf("apply --spec %v left its spec file behind", rest)
+		}
+	}
+}
+
 func TestApplyStartsTheForwarderForReal(t *testing.T) {
 	t.Parallel()
 	p := newPKI(t)

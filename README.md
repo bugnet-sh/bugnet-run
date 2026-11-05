@@ -87,7 +87,7 @@ and `Server` move to `Bugnet-Cache-Control` and `Bugnet-Server` (`-` when absent
 response carries `Cache-Control: private`.
 
 `egress apply --spec FILE [--root DIR]` points the sandbox's secret hosts at the forwarder. It
-reads the spec, deletes it, and then, in this order:
+reads the spec and deletes it, even when another argument is wrong. Then, in this order:
 
 1. Writes `/etc/bugnet/egress.token` (0600) when the spec carries a token.
 2. Writes `/etc/bugnet/egress.json` (0644) with the endpoint, its pinned IPs, the port, the listen

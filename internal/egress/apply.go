@@ -121,8 +121,14 @@ func run(ctx context.Context, args []string) (result, error) {
 	flags.SetOutput(io.Discard)
 	specPath := flags.String("spec", "", "spec file, deleted once read")
 	rootDir := flags.String("root", "/", "directory standing for the sandbox's /")
-	if err := flags.Parse(args); err != nil {
-		return result{}, fail(ErrBadSpec, err)
+	parseErr := flags.Parse(args)
+	// The spec goes before any other check, so a refused run never leaves its token behind
+	spec, specErr := Spec{}, errors.New("missing --spec")
+	if *specPath != "" {
+		spec, specErr = readSpec(*specPath)
+	}
+	if parseErr != nil {
+		return result{}, fail(ErrBadSpec, parseErr)
 	}
 	if flags.NArg() > 0 {
 		return result{}, fail(ErrBadSpec, fmt.Errorf("unexpected argument %q", flags.Arg(0)))
@@ -131,12 +137,8 @@ func run(ctx context.Context, args []string) (result, error) {
 	if err != nil {
 		return result{}, fail(ErrBadSpec, err)
 	}
-	if *specPath == "" {
-		return result{}, fail(ErrBadSpec, errors.New("missing --spec"))
-	}
-	spec, err := readSpec(*specPath)
-	if err != nil {
-		return result{}, fail(ErrBadSpec, err)
+	if specErr != nil {
+		return result{}, fail(ErrBadSpec, specErr)
 	}
 	exe, err := executable()
 	if err != nil {
