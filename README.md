@@ -138,8 +138,9 @@ with the same spec changes no file and keeps the same forwarder.
   sends nothing within 10 s is closed, which frees its slot.
 - `SIGHUP` reloads the config and token for new connections. Open ones keep going. A config that
   fails its checks is ignored.
-- It writes `/run/bugnet/forward.pid` once it listens. It logs counts only, never hosts,
-  addresses or bytes.
+- It writes `/run/bugnet/forward.pid` once it listens. Its logs hold counts and its own errors,
+  never hosts, the token or bytes. A failed listen names the listen address. A config error names
+  the field, never its value.
 
 `egress.json` holds `endpoint`, `ips`, `port`, `listen`, `token_file`, `hosts` and `roots_file`.
 Its paths are sandbox paths, mapped through `--root`.

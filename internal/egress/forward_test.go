@@ -50,8 +50,9 @@ func TestForwardRefusesLoopbackListen(t *testing.T) {
 	t.Parallel()
 	for _, a := range []string{"127.0.0.1:443", "[::1]:443", "0.0.0.0:443", ":443",
 		"127.77.0.2:443", "127.77.0.1:0", "127.0.0.1:0", "[::]:443", "127.77.0.1"} {
-		if loadConfig(t, sandbox.System, func(c *Config) { c.Listen = a }) == nil {
-			t.Errorf("listen %q was accepted in a sandbox", a)
+		err := loadConfig(t, sandbox.System, func(c *Config) { c.Listen = a })
+		if err == nil || !strings.HasSuffix(err.Error(), ": listen is not 127.77.0.1 with a port") {
+			t.Errorf("listen %q in a sandbox gave %v, want a refusal that quotes nothing", a, err)
 		}
 	}
 	must(t, loadConfig(t, sandbox.System, func(*Config) {}))

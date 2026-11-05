@@ -130,7 +130,7 @@ func checkListen(listen string, testRoot bool) error {
 	case testRoot && host == "127.0.0.1":
 		return nil
 	}
-	return fmt.Errorf("listen address %q is not %s with a port", listen, ListenIP)
+	return fmt.Errorf("listen is not %s with a port", ListenIP)
 }
 
 func checkHosts(hosts []string) error {
