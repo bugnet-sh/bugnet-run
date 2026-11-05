@@ -25,6 +25,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -192,15 +193,26 @@ type tunnelServer struct {
 	accepts atomic.Int64
 	drop    atomic.Int64
 	open    atomic.Int64
-	mu      sync.Mutex
-	reqs    []*http.Request
+	// status, when set, is the proxy's answer instead of the upgrade
+	status atomic.Int64
+	mu     sync.Mutex
+	reqs   []*http.Request
 }
 
 func newTunnelServer(t *testing.T, p *pki, name string) *tunnelServer {
 	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	must(t, err)
+	return serveTunnel(t, p, name, ln)
+}
+
+// serveTunnel answers tunnels on ln with a certificate for name
+func serveTunnel(t *testing.T, p *pki, name string, ln net.Listener) *tunnelServer {
+	t.Helper()
 	s := &tunnelServer{}
 	srv := httptest.NewUnstartedServer(s)
-	srv.Listener = dropListener{Listener: srv.Listener, s: s}
+	_ = srv.Listener.Close()
+	srv.Listener = dropListener{Listener: ln, s: s}
 	srv.TLS = &tls.Config{Certificates: []tls.Certificate{p.leaf(t, name)}}
 	srv.Config.ErrorLog = log.New(io.Discard, "", 0)
 	srv.StartTLS()
@@ -213,6 +225,10 @@ func (s *tunnelServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
 	s.reqs = append(s.reqs, r.Clone(context.Background()))
 	s.mu.Unlock()
+	if code := s.status.Load(); code != 0 {
+		w.WriteHeader(int(code))
+		return
+	}
 	if r.URL.Path != TunnelPath || !strings.HasPrefix(r.Header.Get("Authorization"), "Bearer ") {
 		w.WriteHeader(http.StatusNotFound)
 		return
@@ -253,6 +269,24 @@ func (l dropListener) Accept() (net.Conn, error) {
 		}
 		return c, nil
 	}
+}
+
+// sharedPort listens on one port of 127.0.0.1 and of a second loopback address
+func sharedPort(t *testing.T) (first, second net.Listener) {
+	t.Helper()
+	for range 20 {
+		first, err := net.Listen("tcp", "127.0.0.1:0")
+		must(t, err)
+		port := strconv.Itoa(first.Addr().(*net.TCPAddr).Port)
+		for _, ip := range []string{"::1", "127.0.0.2"} {
+			if second, err := net.Listen("tcp", net.JoinHostPort(ip, port)); err == nil {
+				return first, second
+			}
+		}
+		_ = first.Close()
+	}
+	t.Skip("no second loopback address has the port 127.0.0.1 got free")
+	return nil, nil
 }
 
 /* Forwarder in this process */

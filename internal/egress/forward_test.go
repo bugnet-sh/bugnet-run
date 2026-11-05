@@ -198,6 +198,33 @@ func TestForwardTriesTheNextPinnedIP(t *testing.T) {
 	eq(t, roundTrip(t, dial(t, fw.addr), "second ip"), "second ip")
 }
 
+func TestForwardStopsAtTheProxysAnswer(t *testing.T) {
+	t.Parallel()
+	p := newPKI(t)
+	for _, code := range []int64{401, 403, 429} {
+		s := newTunnelServer(t, p, testEndpoint)
+		s.status.Store(code)
+		fw := startForwarder(t, p, testConfig(s), testToken)
+		began := time.Now()
+		eq(t, closedSoon(t, dial(t, fw.addr), "refused", 900*time.Millisecond), true)
+		if took := time.Since(began); took >= firstRetry {
+			t.Fatalf("a %d came back after %v, as if the first dial was retried", code, took)
+		}
+		eq(t, s.accepts.Load(), int64(1))
+		eq(t, len(s.requests()), 1)
+	}
+
+	first, second := sharedPort(t)
+	refusing, next := serveTunnel(t, p, testEndpoint, first), serveTunnel(t, p, testEndpoint, second)
+	refusing.status.Store(401)
+	cfg := testConfig(refusing)
+	cfg.IPs = []string{"127.0.0.1", second.Addr().(*net.TCPAddr).IP.String()}
+	fw := startForwarder(t, p, cfg, testToken)
+	eq(t, closedSoon(t, dial(t, fw.addr), "refused", 900*time.Millisecond), true)
+	eq(t, refusing.accepts.Load(), int64(1))
+	eq(t, next.accepts.Load(), int64(0))
+}
+
 func TestForwardWaitsForTheClientToSpeak(t *testing.T) {
 	t.Parallel()
 	p := newPKI(t)
