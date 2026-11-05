@@ -3,12 +3,14 @@ package setup
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"net"
 	"os"
 	"path/filepath"
 	"strings"
 	"syscall"
 	"testing"
+	"time"
 
 	"github.com/oynozan/bugnet-run/internal/sandbox"
 )
@@ -312,4 +314,40 @@ func TestSetupUnderSystemd(t *testing.T) {
 	eq(t, out, `{"gate":"listening","ca":"skipped","init":"systemd"}`)
 	eq(t, fake.take(), []string(nil))
 	eq(t, f.gatePid(t), pid)
+}
+
+func TestSetupWaitsForTheSandboxLock(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t)
+	must(t, os.MkdirAll(f.root.Path(sandbox.EtcDir), 0o755))
+	unlock, err := sandbox.Lock(f.root)
+	must(t, err)
+	locked := true
+	t.Cleanup(func() {
+		if locked {
+			unlock()
+		}
+	})
+	args := []string{"--spec", f.specFile(t, f.spec()), "--root", f.root.Dir()}
+	done := make(chan string, 1)
+	go func() {
+		var out, errOut bytes.Buffer
+		code := Run(args, &out, &errOut)
+		done <- fmt.Sprintf("%d %s", code, strings.TrimSpace(out.String()))
+	}()
+
+	select {
+	case got := <-done:
+		t.Fatalf("setup finished as %q while respawn held the sandbox lock", got)
+	case <-time.After(300 * time.Millisecond):
+	}
+	eq(t, exists(f.root.Path(sandbox.GateKeyFile)), false)
+	locked = false
+	unlock()
+	select {
+	case got := <-done:
+		eq(t, got, `0 {"gate":"listening","ca":"skipped","init":"setsid"}`)
+	case <-time.After(15 * time.Second):
+		t.Fatal("setup did not finish once the lock was free")
+	}
 }

@@ -120,6 +120,31 @@ func TestRespawnCommand(t *testing.T) {
 	waitFor(t, 5*time.Second, func() bool { return healthy(addr) })
 }
 
+func TestRespawnSkipsWhileSetupHoldsTheLock(t *testing.T) {
+	t.Parallel()
+	root, addr := setupGate(t)
+	pid, err := sandbox.ReadPidFile(root, "gate")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := syscall.Kill(pid, syscall.SIGKILL); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, 5*time.Second, func() bool { return gone(pid) })
+
+	unlock, err := sandbox.Lock(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	eq(t, strings.TrimSpace(string(runRaw(t, "respawn", "--root", root.Dir()))),
+		`{"started":[]}`)
+	eq(t, healthy(addr), false)
+	unlock()
+	eq(t, strings.TrimSpace(string(runRaw(t, "respawn", "--root", root.Dir()))),
+		`{"started":["gate"]}`)
+	waitFor(t, 5*time.Second, func() bool { return healthy(addr) })
+}
+
 func TestRespawnFailureNeverFailsTheJob(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
