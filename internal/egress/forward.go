@@ -185,6 +185,8 @@ type Forwarder struct {
 	every  time.Duration
 	// speakWithin is how long a new client may stay silent before it gives its slot back
 	speakWithin time.Duration
+	// handshakeWithin bounds the proxy's TLS handshake and upgrade, so a stalled one frees its slot
+	handshakeWithin time.Duration
 
 	mu  sync.Mutex
 	cur *target
@@ -214,7 +216,7 @@ func NewForwarder(root sandbox.Root, path string, logger *log.Logger) (*Forwarde
 	}
 	return &Forwarder{
 		root: root, path: path, logger: logger, every: statsEvery, speakWithin: handshakeTimeout,
-		cur: t, slots: make(chan struct{}, MaxConns),
+		handshakeWithin: handshakeTimeout, cur: t, slots: make(chan struct{}, MaxConns),
 	}, nil
 }
 
@@ -343,7 +345,7 @@ func (f *Forwarder) relay(ctx context.Context, c net.Conn) {
 // connect retries the first dial after start once, since Boat's first outbound one can fail
 func (f *Forwarder) connect(ctx context.Context) (*wsframe.Conn, error) {
 	first := !f.dialed.Swap(true)
-	ws, err := f.target().tunnel(ctx)
+	ws, err := f.target().tunnel(ctx, f.handshakeWithin)
 	if err == nil || !first || !retryable(err) {
 		return ws, err
 	}
@@ -352,7 +354,7 @@ func (f *Forwarder) connect(ctx context.Context) (*wsframe.Conn, error) {
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	}
-	return f.target().tunnel(ctx)
+	return f.target().tunnel(ctx, f.handshakeWithin)
 }
 
 // retryable is false once the proxy answered or showed a certificate that will not change
@@ -363,10 +365,10 @@ func retryable(err error) bool {
 }
 
 // tunnel tries the pinned addresses in order until one answers the upgrade
-func (t *target) tunnel(ctx context.Context) (*wsframe.Conn, error) {
+func (t *target) tunnel(ctx context.Context, within time.Duration) (*wsframe.Conn, error) {
 	var errs []error
 	for _, ip := range t.cfg.IPs {
-		ws, err := t.via(ctx, ip)
+		ws, err := t.via(ctx, ip, within)
 		if err == nil {
 			return ws, nil
 		}
@@ -379,7 +381,7 @@ func (t *target) tunnel(ctx context.Context) (*wsframe.Conn, error) {
 	return nil, errors.Join(errs...)
 }
 
-func (t *target) via(ctx context.Context, ip string) (*wsframe.Conn, error) {
+func (t *target) via(ctx context.Context, ip string, within time.Duration) (*wsframe.Conn, error) {
 	d := net.Dialer{Timeout: dialTimeout}
 	raw, err := d.DialContext(ctx, "tcp", net.JoinHostPort(ip, strconv.Itoa(t.cfg.Port)))
 	if err != nil {
@@ -389,7 +391,7 @@ func (t *target) via(ctx context.Context, ip string) (*wsframe.Conn, error) {
 		ServerName: t.cfg.Endpoint, RootCAs: t.roots, MinVersion: tls.VersionTLS12,
 		NextProtos: []string{"http/1.1"},
 	})
-	_ = tc.SetDeadline(time.Now().Add(handshakeTimeout))
+	_ = tc.SetDeadline(time.Now().Add(within))
 	if err := tc.HandshakeContext(ctx); err != nil {
 		_ = raw.Close()
 		return nil, err

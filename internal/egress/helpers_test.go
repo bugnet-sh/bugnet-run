@@ -195,8 +195,12 @@ type tunnelServer struct {
 	open    atomic.Int64
 	// status, when set, is the proxy's answer instead of the upgrade
 	status atomic.Int64
-	mu     sync.Mutex
-	reqs   []*http.Request
+	// hold keeps each new connection open without a TLS answer
+	hold atomic.Bool
+	// stall leaves each upgrade unanswered until the client hangs up, or for 10 s
+	stall atomic.Bool
+	mu    sync.Mutex
+	reqs  []*http.Request
 }
 
 func newTunnelServer(t *testing.T, p *pki, name string) *tunnelServer {
@@ -225,6 +229,13 @@ func (s *tunnelServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
 	s.reqs = append(s.reqs, r.Clone(context.Background()))
 	s.mu.Unlock()
+	if s.stall.Load() {
+		select {
+		case <-r.Context().Done():
+		case <-time.After(10 * time.Second):
+		}
+		return
+	}
 	if code := s.status.Load(); code != 0 {
 		w.WriteHeader(int(code))
 		return
@@ -250,7 +261,7 @@ func (s *tunnelServer) requests() []*http.Request {
 	return append([]*http.Request(nil), s.reqs...)
 }
 
-// dropListener closes as many accepted connections as drop says before any TLS
+// dropListener closes the first drop connections before any TLS, and keeps them silent under hold
 type dropListener struct {
 	net.Listener
 	s *tunnelServer
@@ -265,6 +276,10 @@ func (l dropListener) Accept() (net.Conn, error) {
 		l.s.accepts.Add(1)
 		if n := l.s.drop.Load(); n > 0 && l.s.drop.CompareAndSwap(n, n-1) {
 			_ = c.Close()
+			continue
+		}
+		if l.s.hold.Load() {
+			go func() { _, _ = io.Copy(io.Discard, c); _ = c.Close() }()
 			continue
 		}
 		return c, nil

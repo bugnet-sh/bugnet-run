@@ -132,6 +132,8 @@ with the same spec changes no file and keeps the same forwarder.
   replaces them, under a test `--root` only.
 - It sends `GET /v1/tunnel` with `Authorization: Bearer bnt_...` and the subprotocol
   `bugnet-tunnel.v1`, and after `101` copies bytes both ways in binary messages.
+- Each IP gets 5 s to connect, then 10 s for the TLS handshake and the upgrade. A proxy that
+  stalls past that is dropped and the next IP is tried, so it never holds a slot.
 - The first dial after start is retried once after 1 s. An answer from the proxy or a bad
   certificate is not retried.
 - At most 64 connections are relayed at once. The next one waits for a slot. A connection that

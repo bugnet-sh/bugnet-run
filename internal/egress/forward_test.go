@@ -234,6 +234,7 @@ func TestForwardWaitsForTheClientToSpeak(t *testing.T) {
 	s := newTunnelServer(t, p, testEndpoint)
 	fw := startForwarder(t, p, testConfig(s), testToken)
 	eq(t, fw.f.speakWithin, handshakeTimeout)
+	eq(t, fw.f.handshakeWithin, handshakeTimeout)
 	_ = dial(t, fw.addr).Close()
 	waitFor(t, 5*time.Second, func() bool { return fw.f.accepted.Load() == 1 })
 	eq(t, roundTrip(t, dial(t, fw.addr), "speaks"), "speaks")
@@ -263,6 +264,38 @@ func TestForwardFreesTheSlotsOfSilentClients(t *testing.T) {
 	eq(t, roundTrip(t, slow, "first"), "first")
 	time.Sleep(300 * time.Millisecond)
 	eq(t, roundTrip(t, slow, "pause"), "pause")
+}
+
+func TestForwardGivesUpOnAStalledProxy(t *testing.T) {
+	t.Parallel()
+	p := newPKI(t)
+	for _, stage := range []string{"tls", "upgrade"} {
+		s := newTunnelServer(t, p, testEndpoint)
+		stall := &s.stall
+		if stage == "tls" {
+			stall = &s.hold
+		}
+		stall.Store(true)
+		// Past the first dial, whose retry TestForwardRetriesFirstDialOnce covers
+		fw := startForwarder(t, p, testConfig(s), testToken, func(f *Forwarder) {
+			f.handshakeWithin = 100 * time.Millisecond
+			f.dialed.Store(true)
+		})
+		if !closedSoon(t, dial(t, fw.addr), "x", 900*time.Millisecond) {
+			t.Fatalf("a proxy stalled at its %s answer held the client", stage)
+		}
+		eq(t, fw.f.failed.Load(), int64(1))
+
+		for range MaxConns {
+			_, err := io.WriteString(dial(t, fw.addr), "x")
+			must(t, err)
+		}
+		waitFor(t, 5*time.Second, func() bool { return fw.f.failed.Load() == MaxConns+1 })
+		eq(t, s.accepts.Load(), int64(MaxConns+1))
+		stall.Store(false)
+		eq(t, roundTrip(t, dial(t, fw.addr), stage), stage)
+		eq(t, s.accepts.Load(), int64(MaxConns+2))
+	}
 }
 
 func TestForwardCaps64Connections(t *testing.T) {
