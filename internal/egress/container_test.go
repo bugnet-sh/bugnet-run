@@ -154,6 +154,23 @@ func TestContainerApplyOnBindMountedHosts(t *testing.T) {
 			eq(t, strings.Fields(inContainer(t, id, "getent hosts api.github.com"))[0],
 				"127.77.0.1")
 
+			inContainer(t, id, "useradd -m bx")
+			npmrc := func(placeholder, want string) {
+				t.Helper()
+				npm := s
+				npm.Home, npm.NPMPlaceholder = "/home/bx", placeholder
+				b, err := json.Marshal(npm)
+				must(t, err)
+				eq(t, containerApply(t, id, b), `{"forward":"listening","hosts":2,"secrets":1}`)
+				eq(t, inContainer(t, id, "stat -c '%U %G %a' /home/bx/.npmrc"), "bx bx 600")
+				eq(t, inContainer(t, id, "su -s /bin/sh bx -c 'cat ~/.npmrc'"), want)
+			}
+			block := "# bugnet begin\n//registry.npmjs.org/:_authToken="
+			npmrc(npmPlaceholder, block+npmPlaceholder+"\n# bugnet end")
+			inContainer(t, id, "su -s /bin/sh bx -c 'echo color=false >> ~/.npmrc'")
+			npmrc(ghPlaceholder, block+ghPlaceholder+"\n# bugnet end\ncolor=false")
+			npmrc("", "color=false")
+
 			// A process on 0.0.0.0:443 takes the forwarder's address, as user code could
 			inContainer(t, id, "kill -9 "+pid)
 			inContainer(t, id, "mkdir -p /tmp/s/etc/bugnet && echo "+gateKey+
