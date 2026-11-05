@@ -341,6 +341,63 @@ func Accept(w http.ResponseWriter, r *http.Request, protocol string) (*Conn, err
 	return NewConn(conn, rw.Reader, false), nil
 }
 
+// UpgradeError is an answer to Handshake other than a WebSocket 101 for the protocol
+type UpgradeError struct {
+	// Status is the answer's HTTP status
+	Status int
+	why    string
+}
+
+func (e *UpgradeError) Error() string {
+	return fmt.Sprintf("websocket upgrade answered %d: %s", e.Status, e.why)
+}
+
+// Handshake asks the server at the far end of conn to upgrade path on host for protocol
+func Handshake(conn net.Conn, host, path, protocol string, h http.Header) (*Conn, error) {
+	if strings.ContainsAny(host+path+protocol, " \t\r\n") || !strings.HasPrefix(path, "/") {
+		return nil, errors.New("websocket handshake target holds a space or a line break")
+	}
+	var nonce [16]byte
+	_, _ = rand.Read(nonce[:])
+	key := base64.StdEncoding.EncodeToString(nonce[:])
+	out := h.Clone()
+	if out == nil {
+		out = http.Header{}
+	}
+	out.Set("Upgrade", "websocket")
+	out.Set("Connection", "Upgrade")
+	out.Set("Sec-WebSocket-Key", key)
+	out.Set("Sec-WebSocket-Version", "13")
+	if protocol != "" {
+		out.Set("Sec-WebSocket-Protocol", protocol)
+	}
+	var b bytes.Buffer
+	fmt.Fprintf(&b, "GET %s HTTP/1.1\r\nHost: %s\r\n", path, host)
+	_ = out.Write(&b)
+	b.WriteString("\r\n")
+	if _, err := conn.Write(b.Bytes()); err != nil {
+		return nil, err
+	}
+	br := bufio.NewReader(conn)
+	res, err := http.ReadResponse(br, &http.Request{Method: http.MethodGet})
+	if err != nil {
+		return nil, err
+	}
+	_ = res.Body.Close()
+	switch {
+	case res.StatusCode != http.StatusSwitchingProtocols:
+		return nil, &UpgradeError{Status: res.StatusCode, why: "not switching protocols"}
+	case !hasToken(res.Header, "Upgrade", "websocket", false) ||
+		!hasToken(res.Header, "Connection", "upgrade", false):
+		return nil, &UpgradeError{Status: res.StatusCode, why: "not a websocket upgrade"}
+	case res.Header.Get("Sec-WebSocket-Accept") != AcceptKey(key):
+		return nil, &UpgradeError{Status: res.StatusCode, why: "wrong accept key"}
+	case res.Header.Get("Sec-WebSocket-Protocol") != protocol:
+		return nil, &UpgradeError{Status: res.StatusCode, why: "another subprotocol"}
+	}
+	return NewConn(conn, br, true), nil
+}
+
 func hasToken(h http.Header, name, token string, exact bool) bool {
 	for _, v := range h.Values(name) {
 		for t := range strings.SplitSeq(v, ",") {

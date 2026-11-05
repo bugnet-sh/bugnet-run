@@ -254,3 +254,90 @@ func readRawFrame(t *testing.T, c *Conn) (byte, bool, []byte) {
 	must(t, err)
 	return h.op, h.fin, payload
 }
+
+func TestHandshakeAgainstAccept(t *testing.T) {
+	t.Parallel()
+	seen := make(chan *http.Request, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen <- r
+		c, err := Accept(w, r, "bugnet-tunnel.v1")
+		if err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		defer func() { _ = c.Close() }()
+		_, _ = io.Copy(c, c)
+	}))
+	t.Cleanup(srv.Close)
+
+	conn, err := net.Dial("tcp", srv.Listener.Addr().String())
+	must(t, err)
+	t.Cleanup(func() { _ = conn.Close() })
+	c, err := Handshake(conn, "egress.example", "/v1/tunnel", "bugnet-tunnel.v1",
+		http.Header{"Authorization": {"Bearer bnt_x"}})
+	must(t, err)
+	r := <-seen
+	eq(t, r.Method, http.MethodGet)
+	eq(t, r.URL.Path, "/v1/tunnel")
+	eq(t, r.Host, "egress.example")
+	eq(t, r.Header.Get("Authorization"), "Bearer bnt_x")
+	eq(t, r.Header.Get("Sec-Websocket-Protocol"), "bugnet-tunnel.v1")
+	eq(t, r.Header.Get("User-Agent"), "")
+
+	_, err = c.Write([]byte("through"))
+	must(t, err)
+	got := make([]byte, 7)
+	_, err = io.ReadFull(c, got)
+	must(t, err)
+	eq(t, string(got), "through")
+}
+
+func TestHandshakeRefusesAnythingButItsUpgrade(t *testing.T) {
+	t.Parallel()
+	for _, c := range []struct {
+		name   string
+		status int
+		answer func(key string) string
+	}{
+		{"401", 401, func(string) string {
+			return "HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\n"
+		}},
+		{"200", 200, func(string) string { return "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n" }},
+		{"wrong accept", 101, func(string) string {
+			return switching(AcceptKey("dGhlIHNhbXBsZSBub25jZQ=="), "bugnet-tunnel.v1")
+		}},
+		{"no protocol", 101, func(key string) string { return switching(AcceptKey(key), "") }},
+		{"other protocol", 101, func(key string) string {
+			return switching(AcceptKey(key), "other")
+		}},
+	} {
+		client, server := net.Pipe()
+		go func() {
+			req, err := http.ReadRequest(bufio.NewReader(server))
+			if err == nil {
+				_, _ = io.WriteString(server, c.answer(req.Header.Get("Sec-Websocket-Key"))+"\r\n")
+			}
+		}()
+		_, err := Handshake(client, "egress.example", "/v1/tunnel", "bugnet-tunnel.v1", nil)
+		var up *UpgradeError
+		if !errors.As(err, &up) || up.Status != c.status {
+			t.Errorf("%s: %v, want an UpgradeError with status %d", c.name, err, c.status)
+		}
+		_ = client.Close()
+		_ = server.Close()
+	}
+	client, _ := net.Pipe()
+	_, err := Handshake(client, "egress.example", "/v1/tunnel\r\nX: y", "bugnet-tunnel.v1", nil)
+	if err == nil {
+		t.Error("a path holding a line break was sent")
+	}
+}
+
+func switching(accept, protocol string) string {
+	s := "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n" +
+		"Sec-WebSocket-Accept: " + accept + "\r\n"
+	if protocol != "" {
+		s += "Sec-WebSocket-Protocol: " + protocol + "\r\n"
+	}
+	return s
+}
