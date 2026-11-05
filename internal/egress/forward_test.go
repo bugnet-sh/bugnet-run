@@ -38,8 +38,8 @@ func TestWireNames(t *testing.T) {
 		"127.77.0.1", "/v1/tunnel", "bugnet-tunnel.v1",
 	})
 	eq(t, MaxConns, 64)
-	eq(t, []time.Duration{firstRetry, listenWait, handshakeTimeout}, []time.Duration{
-		time.Second, 5 * time.Second, 10 * time.Second,
+	eq(t, []time.Duration{firstRetry, listenWait, dialTimeout, handshakeTimeout}, []time.Duration{
+		time.Second, 5 * time.Second, 5 * time.Second, 10 * time.Second,
 	})
 	eq(t, []string{ErrBadSpec, ErrPort443Taken, ErrTokenMissing, ErrApplyFailed}, []string{
 		"bad_spec", "port_443_taken", "token_missing", "apply_failed",
