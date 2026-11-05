@@ -13,8 +13,15 @@ import (
 	"github.com/oynozan/bugnet-run/internal/sandbox"
 )
 
-// respawnTimeout bounds the respawn a job start runs, so it never holds the job up for long
-const respawnTimeout = 15 * time.Second
+// Variables so tests can take the sudo path and stand in for sudo
+var (
+	// respawnTimeout bounds the respawn a job start runs, so it never holds the job up for long
+	respawnTimeout = 15 * time.Second
+	// sudoProgram runs respawn as root for a start that is not root
+	sudoProgram = "sudo"
+	// privileged reports whether start may bring back the services of root itself
+	privileged = func(root sandbox.Root) bool { return os.Geteuid() == 0 || !root.IsSystem() }
+)
 
 type respawnResult struct {
 	Started []string `json:"started"`
@@ -88,10 +95,15 @@ func respawnBeforeJob(root sandbox.Root) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), respawnTimeout)
 	defer cancel()
-	if os.Geteuid() == 0 || !root.IsSystem() {
+	if privileged(root) {
 		_, _ = respawnServices(ctx, root, exe)
 		return
 	}
 	sandbox.CloseInherited()
-	_ = exec.CommandContext(ctx, "sudo", "-n", exe, "respawn").Run()
+	_ = exec.CommandContext(ctx, sudoProgram, sudoArgs(exe, root)...).Run()
+}
+
+// sudoArgs runs respawn for root through sudo, which must never stop to ask for a password
+func sudoArgs(exe string, root sandbox.Root) []string {
+	return append([]string{"-n", exe, "respawn"}, root.Args()...)
 }
