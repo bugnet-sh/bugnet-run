@@ -169,7 +169,8 @@ func (s *sudoSandbox) start(t *testing.T, sudo, timeout, id string) {
 		}
 	}
 	if exit == nil || exit.Code != 0 || string(stdout) != "ran\n" {
-		t.Fatalf("job %s gave stdout %q and exit %+v, want %q and code 0", id, stdout, exit, "ran\n")
+		t.Fatalf("job %s gave stdout %q and exit %+v, want %q and code 0", id, stdout, exit,
+			"ran\n")
 	}
 }
 
@@ -183,7 +184,7 @@ func (s *sudoSandbox) killGate(t *testing.T) int {
 		t.Fatal(err)
 	}
 	s.killed[pid] = true
-	waitUntil(t, 5*time.Second, func() bool { return errors.Is(syscall.Kill(pid, 0), syscall.ESRCH) })
+	waitUntil(t, 5*time.Second, func() bool { return gone(pid) })
 	return pid
 }
 
@@ -195,7 +196,7 @@ func (s *sudoSandbox) stopGate(t *testing.T) {
 		return
 	}
 	_ = syscall.Kill(pid, syscall.SIGTERM)
-	waitUntil(t, 5*time.Second, func() bool { return errors.Is(syscall.Kill(pid, 0), syscall.ESRCH) })
+	waitUntil(t, 5*time.Second, func() bool { return gone(pid) })
 }
 
 func (s *sudoSandbox) healthy() bool {
@@ -252,6 +253,10 @@ func TestSudoFailureNeverFailsTheJob(t *testing.T) {
 		t.Fatalf("start took %v behind a sudo that hangs, want the respawn timeout to end it", took)
 	}
 	same(t, recorded(t, hanging), want)
+}
+
+func gone(pid int) bool {
+	return errors.Is(syscall.Kill(pid, 0), syscall.ESRCH)
 }
 
 func same[T any](t *testing.T, got, want T) {
