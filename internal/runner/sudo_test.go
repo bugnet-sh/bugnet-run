@@ -124,7 +124,7 @@ func (s *sudoSandbox) sudo(t *testing.T, name, tail string) string {
 	return path
 }
 
-// run runs the test binary as bugnet-run that is not root, with sudo standing for sudo
+// run runs the test binary as bugnet-run that is not root, the script at sudo standing in for sudo
 func (s *sudoSandbox) run(t *testing.T, sudo, timeout string, args ...string) ([]byte, []byte) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
