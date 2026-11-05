@@ -120,7 +120,7 @@ func TestApplyPort443TakenForReal(t *testing.T) {
 	s := realSpec(&tunnelServer{port: 443})
 	s.Listen = held.Addr().String()
 	began := time.Now()
-	out, code := runApply(t, root, s)
+	out, _, code := runApply(t, root, s)
 	if took := time.Since(began); took >= listenWait {
 		t.Errorf("a taken port was found after %v, as if apply waited for the forwarder", took)
 	}
@@ -360,11 +360,25 @@ func TestApplyBadSpec(t *testing.T) {
 		must(t, err)
 		cases[name] = b
 	}
+	// Whole refused values only, since the token message itself names bnt_
+	refused := map[string][]string{
+		"short token": {"bnt_short"}, "token prefix": {"bnx_" + testToken[4:]},
+		"endpoint": {"egress.bugnet.sh/x"}, "listen": {"0.0.0.0"}, "host": {"Huggingface.co"},
+		"host line break": {"a.example", "b.example", "1.2.3.4"}, "env value": {"hf_real"},
+		"git placeholder": {"ghp_real"}, "npm placeholder": {"bnsec_UPPER"},
+		"relative home": {"home/boxd"}, "home line break": {"/home/boxd"},
+		"home not clean": {"/home/../etc"}, "placeholder breaks": {"X=1"},
+	}
 	for name, raw := range cases {
 		root := testRoot(t)
-		out, code := runApply(t, root, raw)
+		out, stderr, code := runApply(t, root, raw)
 		if out != `{"error":"bad_spec"}` || code != 1 {
 			t.Errorf("%s: printed %s and exited %d", name, out, code)
+		}
+		for _, v := range refused[name] {
+			if strings.Contains(stderr, v) {
+				t.Errorf("%s: stderr quotes %q: %s", name, v, stderr)
+			}
 		}
 		if exists(root.Path(sandbox.EgressConfig)) || exists(root.Path(sandbox.EgressToken)) {
 			t.Errorf("%s: a bad spec wrote files", name)
@@ -403,7 +417,7 @@ func TestApplyStartsTheForwarderForReal(t *testing.T) {
 	p := newPKI(t)
 	s := newTunnelServer(t, p, testEndpoint)
 	root := realRoot(t, p)
-	out, code := runApply(t, root, realSpec(s))
+	out, _, code := runApply(t, root, realSpec(s))
 	eq(t, out, `{"forward":"listening","hosts":1,"secrets":1}`)
 	eq(t, code, 0)
 	pid, err := sandbox.ReadPidFile(root, "forward")
@@ -414,7 +428,7 @@ func TestApplyStartsTheForwarderForReal(t *testing.T) {
 	eq(t, managedBlock(t, root.Path(sandbox.HostsFile)), "127.0.0.1 huggingface.co\n")
 	files := snapshot(t, root)
 
-	out, _ = runApply(t, root, realSpec(s))
+	out, _, _ = runApply(t, root, realSpec(s))
 	eq(t, out, `{"forward":"listening","hosts":1,"secrets":1}`)
 	eq(t, snapshot(t, root), files)
 	again, err := sandbox.ReadPidFile(root, "forward")
@@ -423,7 +437,7 @@ func TestApplyStartsTheForwarderForReal(t *testing.T) {
 
 	rotated := realSpec(s)
 	rotated.Token = otherToken
-	out, _ = runApply(t, root, rotated)
+	out, _, _ = runApply(t, root, rotated)
 	eq(t, out, `{"forward":"listening","hosts":1,"secrets":1}`)
 	again, err = sandbox.ReadPidFile(root, "forward")
 	must(t, err)
@@ -442,7 +456,7 @@ func TestApplyUnderSystemd(t *testing.T) {
 	root := realRoot(t, p)
 	must(t, os.MkdirAll(root.Path(sandbox.SystemdDir), 0o755))
 	calls := fakeSystemctl(t, root)
-	out, code := runApply(t, root, realSpec(s))
+	out, _, code := runApply(t, root, realSpec(s))
 	eq(t, out, `{"forward":"listening","hosts":1,"secrets":1}`)
 	eq(t, code, 0)
 	unit := readFile(t, root.Path(sandbox.UnitDir+"/bugnet-forward.service"))
@@ -646,8 +660,8 @@ func realSpec(s *tunnelServer) Spec {
 	return sp
 }
 
-// runApply runs apply on spec, a Spec or raw JSON, and returns the line it printed and its status
-func runApply(t *testing.T, root sandbox.Root, spec any) (string, int) {
+// runApply runs apply on spec, a Spec or raw JSON, and returns its line, its stderr and its status
+func runApply(t *testing.T, root sandbox.Root, spec any) (string, string, int) {
 	t.Helper()
 	b, ok := spec.(json.RawMessage)
 	if !ok {
@@ -665,7 +679,12 @@ func runApply(t *testing.T, root sandbox.Root, spec any) (string, int) {
 	if exists(path) {
 		t.Fatal("apply left its spec file behind")
 	}
-	return strings.TrimSpace(out.String()), code
+	for _, v := range []string{"bnsec_", testToken, otherToken} {
+		if strings.Contains(errOut.String(), v) {
+			t.Errorf("apply's stderr quotes %q: %s", v, errOut.String())
+		}
+	}
+	return strings.TrimSpace(out.String()), errOut.String(), code
 }
 
 // fakeSystemctl runs a unit's ExecStart for start, as systemd would, and records every call
