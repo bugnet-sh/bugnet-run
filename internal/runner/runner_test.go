@@ -848,6 +848,8 @@ func TestBadArgs(t *testing.T) {
 		{"start", "--job", "", "--dir", dir, "--", "true"},
 		{"start", "--job", "ok", "--dir", dir},
 		{"start", "--job", "ok", "--dir", dir, "--env", "NOEQUALS", "--", "true"},
+		{"start", "--job", "ok", "--dir", dir, "--root", "relative/fs", "--", "true"},
+		{"respawn", "--root", "relative/fs"},
 		{"attach", "--job", "ok", "--out", "-1", "--err", "0", "--dir", dir},
 		{"cancel", "--dir", dir},
 	}

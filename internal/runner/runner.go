@@ -15,6 +15,7 @@ import (
 
 	"github.com/oynozan/bugnet-run/frame"
 	"github.com/oynozan/bugnet-run/internal/gate"
+	"github.com/oynozan/bugnet-run/internal/setup"
 )
 
 const defaultDir = "/tmp/bugnet/jobs"
@@ -62,8 +63,12 @@ func Run(args []string, stdout, stderr io.Writer) int {
 		return ls(rest, stdout, stderr)
 	case "cancel":
 		return cancel(rest, stdout, stderr)
+	case "setup":
+		return setup.Run(rest, stdout, stderr)
 	case "gate":
 		return gate.Run(rest, stderr)
+	case "respawn":
+		return respawn(rest, stdout, stderr)
 	case "ping":
 		if err := frame.Encode(stdout, frame.Frame{Kind: frame.KindPong}); err != nil {
 			return failed(stderr, err)

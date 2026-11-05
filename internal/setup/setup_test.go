@@ -1,0 +1,315 @@
+package setup
+
+import (
+	"bytes"
+	"encoding/json"
+	"net"
+	"os"
+	"path/filepath"
+	"strings"
+	"syscall"
+	"testing"
+
+	"github.com/oynozan/bugnet-run/internal/sandbox"
+)
+
+func TestSetupStartsTheGate(t *testing.T) {
+	f := newFixture(t)
+	out, code := f.run(t, f.spec())
+	eq(t, out, `{"gate":"listening","ca":"skipped","init":"setsid"}`)
+	eq(t, code, 0)
+	must(t, f.healthy(testKey))
+
+	eq(t, readFile(t, f.root.Path(sandbox.GateKeyFile)), testKey+"\n")
+	var cfg map[string]any
+	must(t, json.Unmarshal([]byte(readFile(t, f.root.Path(sandbox.GateConfig))), &cfg))
+	eq(t, cfg, map[string]any{
+		"listen": f.spec().GateListen, "key_file": "/etc/bugnet/gate.key",
+		"deny":          []any{29417.0, 22.0, 2022.0, 49983.0},
+		"ssh_port_file": "/etc/bugnet/ssh/port",
+	})
+	for path, mode := range map[string]os.FileMode{
+		sandbox.EtcDir: 0o755 | os.ModeDir, sandbox.RunDir: 0o755 | os.ModeDir,
+		sandbox.GateKeyFile: 0o600, sandbox.GateConfig: 0o644, sandbox.EnvFile: 0o644,
+		sandbox.ProfileFile: 0o644,
+	} {
+		info, err := os.Stat(f.root.Path(path))
+		must(t, err)
+		eq(t, info.Mode()&(os.ModeDir|os.ModePerm), mode)
+	}
+}
+
+func TestSetupIsIdempotent(t *testing.T) {
+	f := newFixture(t)
+	tool := fakeUpdateCA(t)
+	s := f.spec()
+	s.CAPEM, s.CAVersion = testCA(t, "Bugnet dev CA"), 1
+	s.CASHA256 = sha(s.CAPEM)
+
+	first, code := f.run(t, s)
+	eq(t, first, `{"gate":"listening","ca":"installed","init":"setsid"}`)
+	eq(t, code, 0)
+	files, pid := snapshot(t, f.root), f.gatePid(t)
+
+	again, code := f.run(t, s)
+	eq(t, again, first)
+	eq(t, code, 0)
+	eq(t, snapshot(t, f.root), files)
+	eq(t, f.gatePid(t), pid)
+	eq(t, alive(pid), true)
+	eq(t, tool.count(), 1)
+	must(t, f.healthy(testKey))
+}
+
+func TestSetupNewKeyRestartsTheGate(t *testing.T) {
+	f := newFixture(t)
+	_, code := f.run(t, f.spec())
+	eq(t, code, 0)
+	pid := f.gatePid(t)
+
+	s := f.spec()
+	s.GateKey = otherKey
+	out, code := f.run(t, s)
+	eq(t, out, `{"gate":"listening","ca":"skipped","init":"setsid"}`)
+	eq(t, code, 0)
+	waitGone(t, pid)
+	must(t, f.healthy(otherKey))
+	eq(t, f.healthy(testKey) != nil, true)
+}
+
+func TestSetupRepairRerunsOnlyGate(t *testing.T) {
+	f := newFixture(t)
+	tool := fakeUpdateCA(t)
+	s := f.spec()
+	s.CAPEM, s.CAVersion = testCA(t, "Bugnet dev CA"), 1
+	_, code := f.run(t, s)
+	eq(t, code, 0)
+
+	writeFile(t, f.root.Path(sandbox.EnvFile), "HAND=1\n")
+	must(t, os.Remove(f.root.Path(sandbox.CABundle)))
+	pid := f.gatePid(t)
+	must(t, syscall.Kill(pid, syscall.SIGKILL))
+	waitGone(t, pid)
+
+	out, code := f.run(t, s, "--repair")
+	eq(t, out, `{"gate":"listening","init":"setsid"}`)
+	eq(t, code, 0)
+	eq(t, f.gatePid(t) != pid, true)
+	must(t, f.healthy(testKey))
+	eq(t, readFile(t, f.root.Path(sandbox.EnvFile)), "HAND=1\n")
+	eq(t, exists(f.root.Path(sandbox.CABundle)), false)
+	eq(t, tool.count(), 1)
+
+	pid = f.gatePid(t)
+	must(t, syscall.Kill(pid, syscall.SIGKILL))
+	waitGone(t, pid)
+	out, code = f.run(t, nil, "--repair")
+	eq(t, out, `{"gate":"listening","init":"setsid"}`)
+	eq(t, code, 0)
+	must(t, f.healthy(testKey))
+
+	healthy := f.gatePid(t)
+	out, code = f.run(t, nil, "--repair")
+	eq(t, out, `{"gate":"listening","init":"setsid"}`)
+	eq(t, code, 0)
+	eq(t, f.gatePid(t), healthy)
+}
+
+func TestSetupRepairWithoutAnySetupIsBadSpec(t *testing.T) {
+	f := newFixture(t)
+	out, code := f.run(t, nil, "--repair")
+	eq(t, out, `{"error":"bad_spec"}`)
+	eq(t, code, 1)
+	out, code = f.run(t, nil)
+	eq(t, out, `{"error":"bad_spec"}`)
+	eq(t, code, 1)
+}
+
+func TestSetupBakedCAMismatch(t *testing.T) {
+	f := newFixture(t)
+	baked := testCA(t, "baked")
+	writeFile(t, f.root.Path(sandbox.CADir+"/bugnet-egress-v1.crt"), baked)
+	s := f.spec()
+	s.CASHA256, s.CAVersion = sha("another CA"), 1
+	out, code := f.run(t, s)
+	eq(t, out, `{"error":"ca_mismatch"}`)
+	eq(t, code, 1)
+	_, err := sandbox.ReadPidFile(f.root, "gate")
+	eq(t, err != nil, true)
+
+	s.CASHA256 = strings.ToUpper(sha(baked))
+	out, code = f.run(t, s)
+	eq(t, out, `{"gate":"listening","ca":"checked","init":"setsid"}`)
+	eq(t, code, 0)
+	eq(t, strings.Contains(readFile(t, f.root.Path(sandbox.EnvFile)),
+		"NODE_EXTRA_CA_CERTS=/usr/local/share/ca-certificates/bugnet-egress-v1.crt\n"), true)
+
+	s.CAVersion = 2
+	out, _ = f.run(t, s)
+	eq(t, out, `{"error":"ca_mismatch"}`)
+}
+
+func TestSetupPEMMustMatchItsHash(t *testing.T) {
+	f := newFixture(t)
+	fakeUpdateCA(t)
+	s := f.spec()
+	s.CAPEM, s.CASHA256, s.CAVersion = testCA(t, "a"), sha("b"), 1
+	out, code := f.run(t, s)
+	eq(t, out, `{"error":"ca_mismatch"}`)
+	eq(t, code, 1)
+	eq(t, exists(f.root.Path(sandbox.CADir+"/bugnet-egress-v1.crt")), false)
+}
+
+func TestSetupSkipsCAWithoutOne(t *testing.T) {
+	f := newFixture(t)
+	tool := fakeUpdateCA(t)
+	out, code := f.run(t, f.spec())
+	eq(t, out, `{"gate":"listening","ca":"skipped","init":"setsid"}`)
+	eq(t, code, 0)
+	eq(t, tool.count(), 0)
+	matches, err := filepath.Glob(f.root.Path(sandbox.CADir + "/*"))
+	must(t, err)
+	eq(t, len(matches), 0)
+	eq(t, readFile(t, f.root.Path(sandbox.EnvFile)),
+		"__VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS=.preview.example\n")
+
+	s := f.spec()
+	s.PreviewDomain = ""
+	_, code = f.run(t, s)
+	eq(t, code, 0)
+	eq(t, readFile(t, f.root.Path(sandbox.EnvFile)), "")
+}
+
+func TestSetupWritesEnvAndProfile(t *testing.T) {
+	f := newFixture(t)
+	fakeUpdateCA(t)
+	s := f.spec()
+	s.CAPEM, s.CAVersion = testCA(t, "Bugnet dev CA"), 3
+	_, code := f.run(t, s)
+	eq(t, code, 0)
+	bundle := "/etc/ssl/certs/ca-certificates.crt"
+	want := "SSL_CERT_FILE=" + bundle + "\nREQUESTS_CA_BUNDLE=" + bundle + "\nCURL_CA_BUNDLE=" +
+		bundle + "\nPIP_CERT=" + bundle + "\nGIT_SSL_CAINFO=" + bundle + "\nAWS_CA_BUNDLE=" +
+		bundle + "\nNODE_EXTRA_CA_CERTS=/usr/local/share/ca-certificates/bugnet-egress-v3.crt\n" +
+		"NODE_USE_SYSTEM_CA=1\nDENO_TLS_CA_STORE=system\n" +
+		"__VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS=.preview.example\n"
+	eq(t, readFile(t, f.root.Path(sandbox.EnvFile)), want)
+	profile := readFile(t, f.root.Path(sandbox.ProfileFile))
+	eq(t, strings.Contains(profile, "export SSL_CERT_FILE='"+bundle+"'\n"), true)
+	eq(t, strings.Contains(profile, "export __VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS="+
+		"'.preview.example'\n"), true)
+	eq(t, readFile(t, f.root.Path(sandbox.CADir+"/bugnet-egress-v3.crt")), s.CAPEM)
+}
+
+func TestSetupCARotationAppends(t *testing.T) {
+	f := newFixture(t)
+	tool := fakeUpdateCA(t)
+	s := f.spec()
+	v1 := testCA(t, "Bugnet CA 1")
+	s.CAPEM, s.CAVersion = v1, 1
+	out, _ := f.run(t, s)
+	eq(t, out, `{"gate":"listening","ca":"installed","init":"setsid"}`)
+	eq(t, tool.count(), 1)
+
+	v2 := strings.TrimSuffix(testCA(t, "Bugnet CA 2"), "\n")
+	s.CAPEM, s.CAVersion = v2, 2
+	out, code := f.run(t, s)
+	eq(t, out, `{"gate":"listening","ca":"appended","init":"setsid"}`)
+	eq(t, code, 0)
+	eq(t, tool.count(), 1)
+	bundle := readFile(t, f.root.Path(sandbox.CABundle))
+	eq(t, bundle, "# system roots\n"+v1+v2+"\n")
+	eq(t, readFile(t, f.root.Path(sandbox.CADir+"/bugnet-egress-v2.crt")), v2)
+	eq(t, strings.Contains(readFile(t, f.root.Path(sandbox.EnvFile)), "bugnet-egress-v2.crt"), true)
+
+	out, _ = f.run(t, s)
+	eq(t, out, `{"gate":"listening","ca":"appended","init":"setsid"}`)
+	eq(t, readFile(t, f.root.Path(sandbox.CABundle)), bundle)
+	eq(t, tool.count(), 1)
+}
+
+func TestSetupInstallsWithoutTheTool(t *testing.T) {
+	f := newFixture(t)
+	writeFile(t, f.root.Path(sandbox.CABundle), "# system roots")
+	s := f.spec()
+	s.CAPEM, s.CAVersion = testCA(t, "Bugnet CA"), 1
+	out, code := f.run(t, s)
+	eq(t, out, `{"gate":"listening","ca":"installed","init":"setsid"}`)
+	eq(t, code, 0)
+	eq(t, readFile(t, f.root.Path(sandbox.CABundle)), "# system roots\n"+s.CAPEM)
+}
+
+func TestSetupBadSpec(t *testing.T) {
+	f := newFixture(t)
+	bad := map[string]func(*Spec){
+		"version":       func(s *Spec) { s.V = 2 },
+		"short key":     func(s *Spec) { s.GateKey = testKey[:42] },
+		"key alphabet":  func(s *Spec) { s.GateKey = testKey[:42] + "+" },
+		"no listen":     func(s *Spec) { s.GateListen = "" },
+		"listen port 0": func(s *Spec) { s.GateListen = ":0" },
+		"deny port":     func(s *Spec) { s.DenyPorts = []int{70000} },
+		"pem":           func(s *Spec) { s.CAPEM, s.CAVersion = "not a certificate", 1 },
+		"sha":           func(s *Spec) { s.CASHA256, s.CAVersion = "abc", 1 },
+		"ca version":    func(s *Spec) { s.CASHA256 = sha("x") },
+		"domain":        func(s *Spec) { s.PreviewDomain = "a b\nX=1" },
+		"dot domain":    func(s *Spec) { s.PreviewDomain = ".preview.example" },
+	}
+	for name, change := range bad {
+		s := f.spec()
+		change(&s)
+		out, code := f.run(t, s)
+		if out != `{"error":"bad_spec"}` || code != 1 {
+			t.Errorf("%s: printed %s and exited %d", name, out, code)
+		}
+	}
+	for _, raw := range []json.RawMessage{
+		json.RawMessage(`{"v": 1, "gate_key": "` + testKey + `", "gate_listen": ":29417", "x": 1}`),
+		json.RawMessage(`not json`),
+	} {
+		out, code := f.run(t, raw)
+		eq(t, out, `{"error":"bad_spec"}`)
+		eq(t, code, 1)
+	}
+	eq(t, exists(f.root.Path(sandbox.GateKeyFile)), false)
+}
+
+func TestSetupGateFailed(t *testing.T) {
+	f := newFixture(t)
+	ln, err := net.Listen("tcp", f.spec().GateListen)
+	must(t, err)
+	t.Cleanup(func() { _ = ln.Close() })
+	out, code := f.run(t, f.spec())
+	eq(t, out, `{"error":"gate_failed"}`)
+	eq(t, code, 1)
+}
+
+func TestSetupUnderSystemd(t *testing.T) {
+	f := newFixture(t)
+	must(t, os.MkdirAll(f.root.Path(sandbox.SystemdDir), 0o755))
+	fake := fakeSystemctl(t, f.root)
+	out, code := f.run(t, f.spec())
+	eq(t, out, `{"gate":"listening","ca":"skipped","init":"systemd"}`)
+	eq(t, code, 0)
+	eq(t, fake.take(), []string{
+		"daemon-reload", "enable --quiet bugnet-gate.service", "reset-failed bugnet-gate.service",
+		"restart bugnet-gate.service",
+	})
+	unit := readFile(t, f.root.Path(sandbox.UnitDir+"/bugnet-gate.service"))
+	for _, line := range []string{
+		"ExecStart=" + binPath + " gate --config " + f.root.Path(sandbox.GateConfig) +
+			" --root " + f.root.Dir(),
+		"Restart=always", "RuntimeDirectory=bugnet", "RuntimeDirectoryPreserve=yes",
+		"WantedBy=multi-user.target",
+	} {
+		if !bytes.Contains([]byte(unit), []byte(line+"\n")) {
+			t.Errorf("unit lacks %q:\n%s", line, unit)
+		}
+	}
+	must(t, f.healthy(testKey))
+	pid := f.gatePid(t)
+
+	out, _ = f.run(t, f.spec())
+	eq(t, out, `{"gate":"listening","ca":"skipped","init":"systemd"}`)
+	eq(t, fake.take(), []string(nil))
+	eq(t, f.gatePid(t), pid)
+}

@@ -10,6 +10,8 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+
+	"github.com/oynozan/bugnet-run/internal/sandbox"
 )
 
 // Shell conventions for a command that could not be started
@@ -83,6 +85,10 @@ func runCommand(dir string, spec commandSpec) int {
 
 // prepare applies cwd and env to the supervisor itself so PATH lookups see the command's view
 func prepare(spec commandSpec) (*exec.Cmd, error) {
+	root, err := sandbox.NewRoot(spec.root)
+	if err != nil {
+		return nil, err
+	}
 	if spec.cwd != "" {
 		cwd, err := filepath.Abs(spec.cwd)
 		if err != nil {
@@ -98,6 +104,21 @@ func prepare(spec commandSpec) (*exec.Cmd, error) {
 	if err := os.Setenv("PYTHONUNBUFFERED", "1"); err != nil {
 		return nil, err
 	}
+	if err := setLocale(spec.env); err != nil {
+		return nil, err
+	}
+	// Read at every job start, so a secret added a moment ago reaches the next command
+	for _, file := range []string{sandbox.EnvFile, sandbox.SecretsEnvFile} {
+		vars, err := sandbox.ReadEnvFile(root.Path(file))
+		if err != nil {
+			continue
+		}
+		for _, v := range vars {
+			if err := os.Setenv(v.Name, v.Value); err != nil {
+				return nil, err
+			}
+		}
+	}
 	for _, kv := range spec.env {
 		k, v, _ := strings.Cut(kv, "=")
 		if err := os.Setenv(k, v); err != nil {
@@ -112,6 +133,34 @@ func prepare(spec commandSpec) (*exec.Cmd, error) {
 		return exec.Command(stdbuf, append([]string{"-oL", "-eL"}, spec.argv...)...), nil
 	}
 	return exec.Command(spec.argv[0], spec.argv[1:]...), nil
+}
+
+// setLocale gives jobs a UTF-8 locale every image has, unless the request names its own
+func setLocale(env envFlag) error {
+	var lang, lcAll, lcOther bool
+	for _, kv := range env {
+		switch k, _, _ := strings.Cut(kv, "="); {
+		case k == "LANG":
+			lang = true
+		case k == "LC_ALL":
+			lcAll = true
+		case strings.HasPrefix(k, "LC_"):
+			lcOther = true
+		}
+	}
+	if !lang {
+		if err := os.Setenv("LANG", "C.UTF-8"); err != nil {
+			return err
+		}
+	}
+	switch {
+	case lcAll:
+		return nil
+	case lang || lcOther:
+		// LC_ALL would mask the locale the request names
+		return os.Unsetenv("LC_ALL")
+	}
+	return os.Setenv("LC_ALL", "C.UTF-8")
 }
 
 func openAppend(path string) (*os.File, error) {
