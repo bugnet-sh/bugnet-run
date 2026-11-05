@@ -45,12 +45,11 @@ type Result struct {
 	Error string `json:"error,omitempty"`
 }
 
-// Values of Result.Error
+// Values of Result.Error, a file that cannot be written counting as gate_failed
 const (
-	ErrBadSpec     = "bad_spec"
-	ErrCAMismatch  = "ca_mismatch"
-	ErrGateFailed  = "gate_failed"
-	ErrWriteFailed = "write_failed"
+	ErrBadSpec    = "bad_spec"
+	ErrCAMismatch = "ca_mismatch"
+	ErrGateFailed = "gate_failed"
 )
 
 // Values of Result.CA
@@ -98,7 +97,7 @@ func Run(args []string, stdout, stderr io.Writer) int {
 	res, err := run(context.Background(), args)
 	status := 0
 	if err != nil {
-		reason := ErrWriteFailed
+		reason := ErrGateFailed
 		var f *failure
 		if errors.As(err, &f) {
 			reason = f.reason
@@ -143,11 +142,11 @@ func run(ctx context.Context, args []string) (Result, error) {
 		return Result{}, fail(ErrGateFailed, err)
 	}
 	if err := makeDirs(root); err != nil {
-		return Result{}, fail(ErrWriteFailed, err)
+		return Result{}, fail(ErrGateFailed, err)
 	}
 	unlock, err := sandbox.Lock(root)
 	if err != nil {
-		return Result{}, fail(ErrWriteFailed, err)
+		return Result{}, fail(ErrGateFailed, err)
 	}
 	defer unlock()
 
@@ -161,7 +160,7 @@ func run(ctx context.Context, args []string) (Result, error) {
 			return Result{}, fail(ErrCAMismatch, err)
 		}
 		if err := writeEnv(root, *spec, res.CA); err != nil {
-			return Result{}, fail(ErrWriteFailed, err)
+			return Result{}, fail(ErrGateFailed, err)
 		}
 	}
 	sup := sandbox.Supervisor{Root: root, Exe: exe, Systemctl: systemctl}
@@ -310,16 +309,16 @@ func gateFiles(root sandbox.Root, spec *Spec) (gate.Config, string, bool, error)
 	}
 	data, err := json.Marshal(cfg)
 	if err != nil {
-		return cfg, "", false, fail(ErrWriteFailed, err)
+		return cfg, "", false, fail(ErrGateFailed, err)
 	}
 	keyChanged, err := sandbox.WriteFile(root.Path(sandbox.GateKeyFile),
 		[]byte(spec.GateKey+"\n"), 0o600)
 	if err != nil {
-		return cfg, "", false, fail(ErrWriteFailed, err)
+		return cfg, "", false, fail(ErrGateFailed, err)
 	}
 	cfgChanged, err := sandbox.WriteFile(root.Path(sandbox.GateConfig), append(data, '\n'), 0o644)
 	if err != nil {
-		return cfg, "", false, fail(ErrWriteFailed, err)
+		return cfg, "", false, fail(ErrGateFailed, err)
 	}
 	return cfg, spec.GateKey, keyChanged || cfgChanged, nil
 }

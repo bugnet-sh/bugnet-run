@@ -285,6 +285,21 @@ func TestSetupGateFailed(t *testing.T) {
 	eq(t, code, 1)
 }
 
+func TestSetupWriteFailureIsGateFailed(t *testing.T) {
+	t.Parallel()
+	for _, blocker := range []string{sandbox.EtcDir, sandbox.GateKeyFile, sandbox.EnvFile} {
+		f := newFixture(t)
+		if blocker == sandbox.EtcDir {
+			writeFile(t, f.root.Path(blocker), "a file where a directory belongs\n")
+		} else {
+			must(t, os.MkdirAll(f.root.Path(blocker), 0o755))
+		}
+		out, code := f.run(t, f.spec())
+		eq(t, out, `{"error":"gate_failed"}`)
+		eq(t, code, 1)
+	}
+}
+
 func TestSetupUnderSystemd(t *testing.T) {
 	f := newFixture(t)
 	must(t, os.MkdirAll(f.root.Path(sandbox.SystemdDir), 0o755))

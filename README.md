@@ -50,8 +50,7 @@ answers its health route. On an error it prints one of these and exits 1:
 |---|---|
 | `bad_spec` | The spec is missing, malformed or fails a check |
 | `ca_mismatch` | The CA could not be put in place, or its SHA-256 differs |
-| `gate_failed` | The gate did not answer within 10 s |
-| `write_failed` | A file could not be written |
+| `gate_failed` | A file could not be written, or the gate did not answer within 10 s |
 
 The `ca` values:
 
