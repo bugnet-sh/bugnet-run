@@ -325,12 +325,15 @@ func ReadPidFile(r Root, name string) (int, error) {
 	return int(pid), nil
 }
 
+// procDir is where process command lines are read, a variable so tests can fake them
+var procDir = "/proc"
+
 // alive trusts kill alone where /proc is missing or hides the process, as for another user's
 func alive(pid int, marker string) bool {
 	if err := syscall.Kill(pid, 0); err != nil && !errors.Is(err, syscall.EPERM) {
 		return false
 	}
-	cmdline, err := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/cmdline")
+	cmdline, err := os.ReadFile(filepath.Join(procDir, strconv.Itoa(pid), "cmdline"))
 	if err != nil {
 		return true
 	}

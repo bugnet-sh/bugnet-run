@@ -95,14 +95,32 @@ func TestContainerGateWithoutIPv6(t *testing.T) {
 			eq(t, docker(t, nil, "exec", id, "cat", "/run/bugnet/gate.pid"), pid)
 			eq(t, docker(t, nil, "exec", id, "bugnet-run", "respawn"), `{"started":[]}`)
 
-			docker(t, nil, "exec", id, "kill", "-9", pid)
+			inContainer(t, id, "kill -9 "+pid)
 			eq(t, docker(t, nil, "exec", id, "bugnet-run", "respawn"), `{"started":["gate"]}`)
 			waitHealthy(t, addr)
-			if docker(t, nil, "exec", id, "cat", "/run/bugnet/gate.pid") == pid {
+			again := docker(t, nil, "exec", id, "cat", "/run/bugnet/gate.pid")
+			if again == pid {
 				t.Fatal("respawn left the dead gate's pid in place")
+			}
+
+			// A live process that is not the gate holds the pid, as after a pid is reused
+			stranger := inContainer(t, id, "sleep 600 </dev/null >/dev/null 2>&1 & echo $!")
+			inContainer(t, id, "kill -9 "+again)
+			inContainer(t, id, "echo "+stranger+" > /run/bugnet/gate.pid")
+			eq(t, docker(t, nil, "exec", id, "bugnet-run", "respawn"), `{"started":["gate"]}`)
+			waitHealthy(t, addr)
+			inContainer(t, id, "kill -0 "+stranger)
+			if docker(t, nil, "exec", id, "cat", "/run/bugnet/gate.pid") == stranger {
+				t.Fatal("respawn left the stranger's pid in place")
 			}
 		})
 	}
+}
+
+// inContainer runs script with the container's sh, so it needs no kill or ps binary
+func inContainer(t *testing.T, id, script string) string {
+	t.Helper()
+	return docker(t, nil, "exec", id, "sh", "-c", script)
 }
 
 func waitHealthy(t *testing.T, addr string) {

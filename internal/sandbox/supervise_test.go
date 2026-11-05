@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
@@ -80,6 +81,32 @@ func TestRunningReadsThePidFile(t *testing.T) {
 	eq(t, s.Running(svc), true)
 	RemovePidFile(r, "sleeper", live.Process.Pid)
 	eq(t, s.Running(svc), false)
+}
+
+func TestAliveChecksTheCommandLine(t *testing.T) {
+	procDir = t.TempDir()
+	t.Cleanup(func() { procDir = "/proc" })
+	live := exec.Command("sleep", "30")
+	must(t, live.Start())
+	t.Cleanup(func() { _ = live.Process.Kill(); _ = live.Wait() })
+	pid := live.Process.Pid
+	cmdline := filepath.Join(procDir, strconv.Itoa(pid), "cmdline")
+
+	eq(t, alive(pid, Gate.marker), true)
+	writeFile(t, cmdline, "/tmp/bugnet/bin/bugnet-run\x00gate\x00--config\x00/etc/gate.json\x00")
+	eq(t, alive(pid, Gate.marker), true)
+	eq(t, alive(pid, Forward.marker), false)
+	writeFile(t, cmdline, "/usr/sbin/sshd\x00-D\x00-e\x00-f\x00/etc/bugnet/ssh/sshd_config\x00")
+	eq(t, alive(pid, SSHD.marker), true)
+	eq(t, alive(pid, Gate.marker), false)
+
+	r := testRoot(t)
+	writeFile(t, r.Path(GateConfig), "{}")
+	must(t, WritePidFile(r, "gate", pid))
+	for _, other := range []string{"sleep\x0030\x00", "/srv/gatekeeper\x00--gate=1\x00", ""} {
+		writeFile(t, cmdline, other)
+		eq(t, names(Supervisor{Root: r}.Dead()), []string{"gate"})
+	}
 }
 
 func TestDeadListsConfiguredServicesWithoutProcess(t *testing.T) {
