@@ -97,7 +97,8 @@ process is gone. It prints `{"started":["gate"]}`.
 
 Under systemd each is a unit in `/etc/systemd/system` with `Restart=always`,
 `RuntimeDirectory=bugnet` and `RuntimeDirectoryPreserve=yes`. Units start from the runner's own
-path, `/tmp/bugnet/bin/bugnet-run`.
+path, `/tmp/bugnet/bin/bugnet-run`. A unit that fails 10 times within 60 s stops restarting.
+Respawn and setup run `systemctl reset-failed` before they start it again.
 
 Managed blocks sit between `# bugnet begin` and `# bugnet end`. A rewrite renames a new file over
 the old one. When the rename fails with `EBUSY` or `EXDEV`, as on a bind-mounted `/etc/hosts`,

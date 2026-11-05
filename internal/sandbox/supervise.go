@@ -218,8 +218,9 @@ func (s Supervisor) unit(svc Service) string {
 		quoted[i] = systemdQuote(a)
 	}
 	var b strings.Builder
-	fmt.Fprintf(&b, "[Unit]\nDescription=%s\nAfter=network.target\nStartLimitIntervalSec=0\n\n",
-		svc.description)
+	// A unit that keeps failing gives up until respawn or setup clears it with reset-failed
+	fmt.Fprintf(&b, "[Unit]\nDescription=%s\nAfter=network.target\n"+
+		"StartLimitIntervalSec=60\nStartLimitBurst=10\n\n", svc.description)
 	fmt.Fprintf(&b, "[Service]\nExecStart=%s\nRestart=always\nRestartSec=1\n",
 		strings.Join(quoted, " "))
 	if svc.killProcess {

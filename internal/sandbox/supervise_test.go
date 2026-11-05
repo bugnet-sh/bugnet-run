@@ -27,7 +27,7 @@ func TestUnitText(t *testing.T) {
 	t.Parallel()
 	s := Supervisor{Root: System, Exe: "/tmp/bugnet/bin/bugnet-run"}
 	eq(t, s.unit(Gate), "[Unit]\nDescription=Bugnet gate\nAfter=network.target\n"+
-		"StartLimitIntervalSec=0\n\n[Service]\n"+
+		"StartLimitIntervalSec=60\nStartLimitBurst=10\n\n[Service]\n"+
 		"ExecStart=/tmp/bugnet/bin/bugnet-run gate --config /etc/bugnet/gate.json\n"+
 		"Restart=always\nRestartSec=1\nRuntimeDirectory=bugnet\nRuntimeDirectoryPreserve=yes\n\n"+
 		"[Install]\nWantedBy=multi-user.target\n")
