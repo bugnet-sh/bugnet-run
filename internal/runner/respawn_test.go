@@ -177,6 +177,70 @@ func TestGateAndSetupBadArgs(t *testing.T) {
 	}
 }
 
+func TestRespawnBringsBackTheForwarder(t *testing.T) {
+	t.Parallel()
+	root, err := sandbox.NewRoot(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	token := "bnt_" + base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{6}, 32))
+	cfg := `{"endpoint":"egress.example","ips":["127.0.0.1"],"port":443,` +
+		`"listen":"127.0.0.1:0","token_file":"/etc/bugnet/egress.token","hosts":[],` +
+		`"roots_file":""}`
+	for path, content := range map[string]string{
+		sandbox.EgressConfig: cfg, sandbox.EgressToken: token + "\n",
+	} {
+		if err := os.MkdirAll(filepath.Dir(root.Path(path)), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(root.Path(path), []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Cleanup(func() {
+		if pid, err := sandbox.ReadPidFile(root, "forward"); err == nil {
+			_ = syscall.Kill(pid, syscall.SIGTERM)
+			waitFor(t, 5*time.Second, func() bool { return gone(pid) })
+		}
+	})
+	forwarder := func() int {
+		var pid int
+		waitFor(t, 5*time.Second, func() bool {
+			pid, err = sandbox.ReadPidFile(root, "forward")
+			return err == nil && !gone(pid)
+		})
+		return pid
+	}
+
+	eq(t, strings.TrimSpace(string(runRaw(t, "respawn", "--root", root.Dir()))),
+		`{"started":["forward"]}`)
+	pid := forwarder()
+	if err := syscall.Kill(pid, syscall.SIGKILL); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, 5*time.Second, func() bool { return gone(pid) })
+	startJob(t, t.TempDir(), "after", nil, "--root", root.Dir(), "--", "true").collect(t, 0, 0).
+		mustExit(t)
+	if again := forwarder(); again == pid {
+		t.Fatalf("the dead forwarder's pid %d is still recorded", pid)
+	}
+}
+
+func TestEgressAndForwardBadArgs(t *testing.T) {
+	t.Parallel()
+	for _, args := range [][]string{{"forward", "--nope"}, {"forward", "extra"}} {
+		cmd := exec.Command(binPath, args...)
+		if err := cmd.Run(); cmd.ProcessState.ExitCode() != 2 {
+			t.Errorf("bugnet-run %v: %v, want exit 2", args, err)
+		}
+	}
+	out, err := exec.Command(binPath, "egress", "apply").Output()
+	if code := exitCode(err); code != 1 || strings.TrimSpace(string(out)) !=
+		`{"error":"bad_spec"}` {
+		t.Errorf("egress apply without --spec printed %q and exited %d", out, code)
+	}
+}
+
 func exitCode(err error) int {
 	if err == nil {
 		return 0

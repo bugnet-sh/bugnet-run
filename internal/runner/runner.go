@@ -70,6 +70,11 @@ func Run(args []string, stdout, stderr io.Writer) int {
 		return gate.Run(rest, stderr)
 	case "respawn":
 		return respawn(rest, stdout, stderr)
+	case "egress":
+		if len(rest) > 0 && rest[0] == "apply" {
+			return egress.Apply(rest[1:], stdout, stderr)
+		}
+		return badArgs(stdout, stderr, errors.New("egress takes the subcommand apply"))
 	case "forward":
 		return egress.Forward(rest, stderr)
 	case "ping":

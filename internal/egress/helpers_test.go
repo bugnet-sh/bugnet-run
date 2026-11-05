@@ -64,6 +64,8 @@ func runTests(m *testing.M) int {
 		fmt.Fprintf(os.Stderr, "build bugnet-run: %v\n%s", err, out)
 		return 1
 	}
+	executable = func() (string, error) { return binPath, nil }
+	rootsForTests = rootsFile
 	return m.Run()
 }
 
@@ -92,11 +94,6 @@ func readFile(t *testing.T, path string) string {
 	b, err := os.ReadFile(path)
 	must(t, err)
 	return string(b)
-}
-
-func exists(path string) bool {
-	_, err := os.Stat(path)
-	return err == nil
 }
 
 func testRoot(t *testing.T) sandbox.Root {

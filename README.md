@@ -86,6 +86,63 @@ App traffic loses `Bugnet-*`, `E2b-*`, `X-Routing-Key` and the `_port_auth` cook
 and `Server` move to `Bugnet-Cache-Control` and `Bugnet-Server` (`-` when absent), and the
 response carries `Cache-Control: private`.
 
+`egress apply --spec FILE [--root DIR]` points the sandbox's secret hosts at the forwarder. It
+reads the spec, deletes it, and then, in this order:
+
+1. Writes `/etc/bugnet/egress.token` (0600) when the spec carries a token.
+2. Writes `/etc/bugnet/egress.json` (0644) with the endpoint, its pinned IPs, the port, the listen
+   address and the hosts.
+3. Starts the forwarder, or sends it `SIGHUP` when its config or token changed. A new listen
+   address restarts it. Before a start it binds the listen address for a moment, so a taken port
+   is found at once.
+4. Waits up to 5 s for the forwarder's pid file and for the listen address to accept.
+5. Rewrites the `/etc/hosts` block to `127.77.0.1 <host> <host> ...`. Lines stay under 500
+   bytes, since musl reads 512 at a time. There is never a `::1` line.
+6. Writes `/etc/bugnet/secrets.env` (0644) and `/etc/profile.d/bugnet.sh`. When our
+   `sshd_config` exists, its one `SetEnv` line is rewritten, and our sshd gets `SIGHUP` if it
+   changed.
+7. Writes the presets. With `git_placeholder`, `/etc/bugnet/git-credentials` (0644) holds
+   `https://x-access-token:<placeholder>@github.com` and a block in `/etc/gitconfig` sets
+   `credential.https://github.com.helper` to `store --file=/etc/bugnet/git-credentials`. With
+   `npm_placeholder`, a block in `<home>/.npmrc` sets `//registry.npmjs.org/:_authToken`. A new
+   `.npmrc` is 0600 and owned by the home's owner. A linked `.npmrc` is left alone. An empty
+   placeholder removes its preset.
+
+It prints `{"forward":"listening","hosts":1,"secrets":1}` and exits 0. On an error it prints one
+of these and exits 1:
+
+| Error | Cause |
+|---|---|
+| `bad_spec` | The spec is missing, malformed or fails a check |
+| `port_443_taken` | Another process holds the listen address |
+| `token_missing` | The spec has no token and `/etc/bugnet/egress.token` holds none |
+| `apply_failed` | A file could not be written, or the forwarder did not listen within 5 s |
+
+The spec holds placeholders only. An `env` value, `git_placeholder` or `npm_placeholder` that is
+not `bnsec_` and 26 base32 characters is `bad_spec`. Hosts must be lower-case names. A second run
+with the same spec changes no file and keeps the same forwarder.
+
+`forward --config /etc/bugnet/egress.json [--root DIR]` relays raw TLS for secret hosts:
+
+- It listens on `127.77.0.1` only. A config naming `127.0.0.1`, `::1` or any other address is
+  refused, since envd on E2B publishes listeners there. Under a test `--root` it may listen on
+  `127.0.0.1`, port 0 included, and it writes the address it got to `/run/bugnet/forward.addr`.
+- For each connection that sends a byte, it dials the pinned IPs in order on the port, with TLS
+  1.2 or newer, SNI and verification for the endpoint against the system roots. `roots_file`
+  replaces them, under a test `--root` only.
+- It sends `GET /v1/tunnel` with `Authorization: Bearer bnt_...` and the subprotocol
+  `bugnet-tunnel.v1`, and after `101` copies bytes both ways in binary messages.
+- The first dial after start is retried once after 1 s. An answer from the proxy or a bad
+  certificate is not retried.
+- At most 64 connections are relayed at once. The next one waits for a slot.
+- `SIGHUP` reloads the config and token for new connections. Open ones keep going. A config that
+  fails its checks is ignored.
+- It writes `/run/bugnet/forward.pid` once it listens. It logs counts only, never hosts,
+  addresses or bytes.
+
+`egress.json` holds `endpoint`, `ips`, `port`, `listen`, `token_file`, `hosts` and `roots_file`.
+Its paths are sandbox paths, mapped through `--root`.
+
 `respawn [--root DIR]` starts the gate, the forwarder or our sshd when its config exists and its
 process is gone. It prints `{"started":["gate"]}`.
 
