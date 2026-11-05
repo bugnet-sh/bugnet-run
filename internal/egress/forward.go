@@ -183,6 +183,8 @@ type Forwarder struct {
 	path   string
 	logger *log.Logger
 	every  time.Duration
+	// speakWithin is how long a new client may stay silent before it gives its slot back
+	speakWithin time.Duration
 
 	mu  sync.Mutex
 	cur *target
@@ -211,8 +213,8 @@ func NewForwarder(root sandbox.Root, path string, logger *log.Logger) (*Forwarde
 		logger = log.New(io.Discard, "", 0)
 	}
 	return &Forwarder{
-		root: root, path: path, logger: logger, every: statsEvery, cur: t,
-		slots: make(chan struct{}, MaxConns),
+		root: root, path: path, logger: logger, every: statsEvery, speakWithin: handshakeTimeout,
+		cur: t, slots: make(chan struct{}, MaxConns),
 	}, nil
 }
 
@@ -313,9 +315,11 @@ func (f *Forwarder) relay(ctx context.Context, c net.Conn) {
 	defer stop()
 	br := bufio.NewReader(c)
 	// A client that never speaks opens no tunnel, so a listen check costs the proxy nothing
+	_ = c.SetReadDeadline(time.Now().Add(f.speakWithin))
 	if _, err := br.Peek(1); err != nil {
 		return
 	}
+	_ = c.SetReadDeadline(time.Time{})
 	ws, err := f.connect(ctx)
 	if err != nil {
 		f.failed.Add(1)

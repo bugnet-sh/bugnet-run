@@ -2,6 +2,7 @@ package egress
 
 import (
 	"encoding/json"
+	"errors"
 	"io"
 	"net"
 	"os"
@@ -231,10 +232,36 @@ func TestForwardWaitsForTheClientToSpeak(t *testing.T) {
 	p := newPKI(t)
 	s := newTunnelServer(t, p, testEndpoint)
 	fw := startForwarder(t, p, testConfig(s), testToken)
+	eq(t, fw.f.speakWithin, handshakeTimeout)
 	_ = dial(t, fw.addr).Close()
 	waitFor(t, 5*time.Second, func() bool { return fw.f.accepted.Load() == 1 })
 	eq(t, roundTrip(t, dial(t, fw.addr), "speaks"), "speaks")
 	eq(t, s.accepts.Load(), int64(1))
+}
+
+func TestForwardFreesTheSlotsOfSilentClients(t *testing.T) {
+	t.Parallel()
+	p := newPKI(t)
+	s := newTunnelServer(t, p, testEndpoint)
+	fw := startForwarder(t, p, testConfig(s), testToken,
+		func(f *Forwarder) { f.speakWithin = 100 * time.Millisecond })
+	silent := make([]net.Conn, MaxConns)
+	for i := range silent {
+		silent[i] = dial(t, fw.addr)
+	}
+	eq(t, roundTrip(t, dial(t, fw.addr), "after them"), "after them")
+	must(t, silent[0].SetReadDeadline(time.Now().Add(5*time.Second)))
+	_, err := silent[0].Read(make([]byte, 1))
+	var ne net.Error
+	if err == nil || errors.As(err, &ne) && ne.Timeout() {
+		t.Fatalf("a silent client was not closed: %v", err)
+	}
+	eq(t, s.accepts.Load(), int64(1))
+
+	slow := dial(t, fw.addr)
+	eq(t, roundTrip(t, slow, "first"), "first")
+	time.Sleep(300 * time.Millisecond)
+	eq(t, roundTrip(t, slow, "pause"), "pause")
 }
 
 func TestForwardCaps64Connections(t *testing.T) {

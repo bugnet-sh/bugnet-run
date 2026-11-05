@@ -134,7 +134,8 @@ with the same spec changes no file and keeps the same forwarder.
   `bugnet-tunnel.v1`, and after `101` copies bytes both ways in binary messages.
 - The first dial after start is retried once after 1 s. An answer from the proxy or a bad
   certificate is not retried.
-- At most 64 connections are relayed at once. The next one waits for a slot.
+- At most 64 connections are relayed at once. The next one waits for a slot. A connection that
+  sends nothing within 10 s is closed, which frees its slot.
 - `SIGHUP` reloads the config and token for new connections. Open ones keep going. A config that
   fails its checks is ignored.
 - It writes `/run/bugnet/forward.pid` once it listens. It logs counts only, never hosts,
