@@ -59,6 +59,15 @@ func TestApplyHostsBlock(t *testing.T) {
 	eq(t, readFile(t, root.Path(sandbox.HostsFile)), "127.0.0.1 localhost\n::1 localhost\n")
 }
 
+func TestApplyLeavesAMissingHostsFileAlone(t *testing.T) {
+	t.Parallel()
+	root := testRoot(t)
+	applyFake(t, root, spec())
+	eq(t, exists(root.Path(sandbox.HostsFile)), false)
+	applyFake(t, root, spec("huggingface.co"))
+	eq(t, managedBlock(t, root.Path(sandbox.HostsFile)), "127.77.0.1 huggingface.co\n")
+}
+
 func TestApplyHostLinesStayShortForMusl(t *testing.T) {
 	t.Parallel()
 	root := testRoot(t)
