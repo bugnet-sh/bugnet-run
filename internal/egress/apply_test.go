@@ -122,6 +122,19 @@ func TestApplyPort443TakenForReal(t *testing.T) {
 	eq(t, err != nil, true)
 }
 
+func TestApplyWaitFindsAPortTakenAfterTheProbe(t *testing.T) {
+	t.Parallel()
+	held, err := net.Listen("tcp", "127.0.0.1:0")
+	must(t, err)
+	t.Cleanup(func() { _ = held.Close() })
+	fwd := supervised{sup: sandbox.Supervisor{Root: testRoot(t)}, wait: 50 * time.Millisecond}
+	eq(t, reasonOf(classify(fwd.Wait(context.Background(), held.Addr().String()))),
+		ErrPort443Taken)
+	must(t, held.Close())
+	eq(t, reasonOf(classify(fwd.Wait(context.Background(), held.Addr().String()))),
+		ErrApplyFailed)
+}
+
 func TestApplyGitAndNpmPresets(t *testing.T) {
 	t.Parallel()
 	root := testRoot(t)
@@ -491,6 +504,15 @@ func applyFake(t *testing.T, root sandbox.Root, s Spec) {
 	if out, _ := applyWith(t, root, fwd, s); strings.Contains(out, "error") {
 		t.Fatalf("apply printed %s", out)
 	}
+}
+
+// reasonOf returns the error value apply would print for err
+func reasonOf(err error) string {
+	var f *failure
+	if !errors.As(err, &f) {
+		return ""
+	}
+	return f.reason
 }
 
 func managedBlock(t *testing.T, path string) string {

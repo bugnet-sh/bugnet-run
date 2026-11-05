@@ -143,7 +143,8 @@ func run(ctx context.Context, args []string) (result, error) {
 		return result{}, fail(ErrApplyFailed, err)
 	}
 	sup := sandbox.Supervisor{Root: root, Exe: exe, Systemctl: systemctl}
-	a := applier{root: root, sup: sup, fwd: supervised{sup: sup}, trace: func(string) {}}
+	fwd := supervised{sup: sup, wait: listenWait}
+	a := applier{root: root, sup: sup, fwd: fwd, trace: func(string) {}}
 	return a.apply(ctx, spec)
 }
 
@@ -239,7 +240,7 @@ type forwarder interface {
 	Restart(ctx context.Context) error
 	// Reload makes a running forwarder read its config and token again
 	Reload() error
-	// Wait returns once the forwarder accepts on listen, or after listenWait
+	// Wait returns once the forwarder accepts on listen, or after its wait
 	Wait(ctx context.Context, listen string) error
 }
 
@@ -471,7 +472,10 @@ func exists(path string) bool {
 /* The forwarder process */
 
 // supervised drives the real forwarder under systemd or setsid
-type supervised struct{ sup sandbox.Supervisor }
+type supervised struct {
+	sup  sandbox.Supervisor
+	wait time.Duration
+}
 
 func (s supervised) Running() bool { return s.sup.Running(sandbox.Forward) }
 
@@ -493,7 +497,7 @@ func (s supervised) Reload() error {
 
 // Wait trusts the pid file, which the forwarder writes only once it listens, and then a connect
 func (s supervised) Wait(ctx context.Context, listen string) error {
-	deadline := time.Now().Add(listenWait)
+	deadline := time.Now().Add(s.wait)
 	for {
 		if s.Running() {
 			if addr, err := s.addr(listen); err == nil && accepts(ctx, addr) {
@@ -514,7 +518,7 @@ func (s supervised) Wait(ctx context.Context, listen string) error {
 			return err
 		}
 	}
-	return fmt.Errorf("the forwarder did not listen on %s within %v", listen, listenWait)
+	return fmt.Errorf("the forwarder did not listen on %s within %v", listen, s.wait)
 }
 
 // addr reads the address a forwarder under a test root got for port 0
