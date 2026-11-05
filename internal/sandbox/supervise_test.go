@@ -204,3 +204,29 @@ func names(svcs []Service) []string {
 	}
 	return out
 }
+
+func TestSignalReachesOnlyARunningService(t *testing.T) {
+	t.Parallel()
+	r := testRoot(t)
+	s := Supervisor{Root: r}
+	svc := Service{Name: "sleeper", marker: "sleep"}
+	sent, err := s.Signal(svc, syscall.SIGHUP)
+	must(t, err)
+	eq(t, sent, false)
+
+	live := exec.Command("sleep", "30")
+	must(t, live.Start())
+	t.Cleanup(func() { _ = live.Process.Kill() })
+	must(t, WritePidFile(r, "sleeper", live.Process.Pid))
+	sent, err = s.Signal(svc, syscall.SIGHUP)
+	must(t, err)
+	eq(t, sent, true)
+	err = live.Wait()
+	ws, ok := live.ProcessState.Sys().(syscall.WaitStatus)
+	if !ok || !ws.Signaled() || ws.Signal() != syscall.SIGHUP {
+		t.Fatalf("sleep ended with %v, want SIGHUP", err)
+	}
+	sent, err = s.Signal(svc, syscall.SIGHUP)
+	must(t, err)
+	eq(t, sent, false)
+}

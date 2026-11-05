@@ -150,6 +150,21 @@ func (s Supervisor) Restart(ctx context.Context, svc Service) error {
 	return err
 }
 
+// Signal sends sig to the service's running process, reporting whether one was running
+func (s Supervisor) Signal(svc Service, sig syscall.Signal) (bool, error) {
+	pid, err := ReadPidFile(s.Root, svc.Name)
+	if err != nil || !alive(pid, svc.marker) {
+		return false, nil
+	}
+	if err := syscall.Kill(pid, sig); err != nil {
+		if errors.Is(err, syscall.ESRCH) {
+			return false, nil
+		}
+		return false, err
+	}
+	return true, nil
+}
+
 // Stop ends the process the service's pid file names, with SIGKILL after a grace period
 func (s Supervisor) Stop(svc Service) error {
 	pid, err := ReadPidFile(s.Root, svc.Name)
