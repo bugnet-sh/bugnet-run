@@ -121,11 +121,15 @@ func TestContainerApplyOnBindMountedHosts(t *testing.T) {
 			docker(t, nil, "exec", "-d", id, "tunnelecho", "/tmp/leaf.pem", "/tmp/leaf.key",
 				"127.0.0.1:9443")
 			eq(t, inContainer(t, id, "grep -c ' /etc/hosts ' /proc/self/mountinfo"), "1")
+			inContainer(t, id, "echo '10.0.0.9 hand.example' >> /etc/hosts")
 			inode := inContainer(t, id, "stat -c %i /etc/hosts")
+			outside := "sed '/# bugnet begin/,/# bugnet end/d' /etc/hosts"
+			before := inContainer(t, id, "cat /etc/hosts")
 
 			want := `{"forward":"listening","hosts":1,"secrets":1}`
 			eq(t, containerApply(t, id, first), want)
 			eq(t, inContainer(t, id, "stat -c %i /etc/hosts"), inode)
+			eq(t, inContainer(t, id, outside), before)
 			eq(t, strings.Fields(inContainer(t, id, "getent hosts huggingface.co")),
 				[]string{"127.77.0.1", "huggingface.co"})
 			eq(t, inContainer(t, id, "sed -n '/# bugnet begin/,/# bugnet end/p' /etc/hosts"),
@@ -140,6 +144,15 @@ func TestContainerApplyOnBindMountedHosts(t *testing.T) {
 			eq(t, containerApply(t, id, again), want)
 			eq(t, inContainer(t, id, "cat /run/bugnet/forward.pid"), pid)
 			eq(t, inContainer(t, id, "cat /etc/hosts"), hosts)
+			inContainer(t, id, "echo '10.0.0.10 later.example' >> /etc/hosts")
+			s.Hosts = []string{"huggingface.co", "api.github.com"}
+			wider, err := json.Marshal(s)
+			must(t, err)
+			eq(t, containerApply(t, id, wider), `{"forward":"listening","hosts":2,"secrets":1}`)
+			eq(t, inContainer(t, id, outside), before+"\n10.0.0.10 later.example")
+			eq(t, inContainer(t, id, "stat -c %i /etc/hosts"), inode)
+			eq(t, strings.Fields(inContainer(t, id, "getent hosts api.github.com"))[0],
+				"127.77.0.1")
 
 			// A process on 0.0.0.0:443 takes the forwarder's address, as user code could
 			inContainer(t, id, "kill -9 "+pid)
