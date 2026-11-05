@@ -249,7 +249,7 @@ func (f *Forwarder) target() *target {
 	return f.cur
 }
 
-// Listen returns the listen address of the config the forwarder loaded first or last
+// Listen returns the listen address the loaded config names
 func (f *Forwarder) Listen() string { return f.target().cfg.Listen }
 
 // Hosts returns how many secret hosts the loaded config maps

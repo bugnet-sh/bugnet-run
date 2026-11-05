@@ -77,8 +77,8 @@ func (f *failure) Unwrap() error { return f.err }
 
 func fail(reason string, err error) error { return &failure{reason: reason, err: err} }
 
-// failed reports a taken listen address as port_443_taken, whatever the address
-func failed(err error) error {
+// classify reports a taken listen address as port_443_taken, whatever the address
+func classify(err error) error {
 	if errors.Is(err, syscall.EADDRINUSE) {
 		return fail(ErrPort443Taken, err)
 	}
@@ -256,11 +256,11 @@ func (a applier) apply(ctx context.Context, s Spec) (result, error) {
 		return result{}, fail(ErrBadSpec, err)
 	}
 	if err := makeDirs(a.root); err != nil {
-		return result{}, failed(err)
+		return result{}, classify(err)
 	}
 	unlock, err := sandbox.Lock(a.root)
 	if err != nil {
-		return result{}, failed(err)
+		return result{}, classify(err)
 	}
 	defer unlock()
 
@@ -273,12 +273,12 @@ func (a applier) apply(ctx context.Context, s Spec) (result, error) {
 	old, oldErr := LoadConfig(a.root.Path(sandbox.EgressConfig), a.root)
 	data, err := json.Marshal(cfg)
 	if err != nil {
-		return result{}, failed(err)
+		return result{}, classify(err)
 	}
 	cfgChanged, err := sandbox.WriteFile(a.root.Path(sandbox.EgressConfig), append(data, '\n'),
 		0o644)
 	if err != nil {
-		return result{}, failed(err)
+		return result{}, classify(err)
 	}
 	a.trace("config")
 
@@ -291,26 +291,28 @@ func (a applier) apply(ctx context.Context, s Spec) (result, error) {
 		err = a.fwd.Reload()
 	}
 	if err != nil {
-		return result{}, failed(err)
+		return result{}, classify(err)
 	}
 	a.trace("forwarder")
 	if err := a.fwd.Wait(ctx, cfg.Listen); err != nil {
-		return result{}, failed(err)
+		return result{}, classify(err)
 	}
 	a.trace("listening")
 
 	ip, _, _ := net.SplitHostPort(cfg.Listen)
-	if err := sandbox.SetBlock(a.root.Path(sandbox.HostsFile), hostsBlock(ip, cfg.Hosts),
-		0o644); err != nil {
-		return result{}, failed(err)
+	hosts := a.root.Path(sandbox.HostsFile)
+	if body := hostsBlock(ip, cfg.Hosts); body != "" || exists(hosts) {
+		if err := sandbox.SetBlock(hosts, body, 0o644); err != nil {
+			return result{}, classify(err)
+		}
 	}
 	a.trace("hosts")
 	if err := a.writeEnv(s); err != nil {
-		return result{}, failed(err)
+		return result{}, classify(err)
 	}
 	a.trace("env")
 	if err := a.writePresets(s); err != nil {
-		return result{}, failed(err)
+		return result{}, classify(err)
 	}
 	a.trace("presets")
 	return result{Forward: "listening", Hosts: len(cfg.Hosts), Secrets: len(s.Env)}, nil
@@ -341,7 +343,7 @@ func (a applier) writeToken(s Spec) (bool, error) {
 	}
 	changed, err := sandbox.WriteFile(path, []byte(s.Token+"\n"), 0o600)
 	if err != nil {
-		return false, failed(err)
+		return false, classify(err)
 	}
 	return changed, nil
 }
