@@ -2,6 +2,7 @@ package sandbox
 
 import (
 	"errors"
+	"fmt"
 	"io"
 	"io/fs"
 	"os"
@@ -16,31 +17,54 @@ const (
 	BlockEnd   = "# bugnet end"
 )
 
-// rename replaces a file, a variable so tests can fail it with EBUSY
-var rename = os.Rename
+// Variables so tests can fail a rename with EBUSY and act while a writer waits for its lock
+var (
+	rename = os.Rename
+	flock  = syscall.Flock
+)
+
+// blockTries bounds how often SetBlock starts again after another writer replaced the file
+const blockTries = 10
 
 // SetBlock makes body the managed block of path, an empty body removing the block
 func SetBlock(path, body string, mode fs.FileMode) error {
+	for range blockTries {
+		if stale, err := setBlock(path, body, mode); !stale {
+			return err
+		}
+	}
+	return fmt.Errorf("%s kept being replaced while waiting for its lock", path)
+}
+
+// setBlock reports stale when path names another file once the lock is held, as after a rename
+func setBlock(path, body string, mode fs.FileMode) (bool, error) {
 	created := !exists(path)
 	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, mode)
 	if err != nil {
-		return err
+		return false, err
 	}
 	defer func() { _ = f.Close() }()
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
-		return err
-	}
-	old, err := io.ReadAll(f)
-	if err != nil {
-		return err
-	}
-	next := withBlock(string(old), body)
-	if next == string(old) {
-		return nil
+	if err := flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
+		return false, err
 	}
 	info, err := f.Stat()
 	if err != nil {
-		return err
+		return false, err
+	}
+	now, err := os.Stat(path)
+	if errors.Is(err, fs.ErrNotExist) || err == nil && !os.SameFile(info, now) {
+		return true, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	old, err := io.ReadAll(f)
+	if err != nil {
+		return false, err
+	}
+	next := withBlock(string(old), body)
+	if next == string(old) {
+		return false, nil
 	}
 	perm := info.Mode().Perm()
 	if created {
@@ -48,9 +72,9 @@ func SetBlock(path, body string, mode fs.FileMode) error {
 	}
 	err = replace(path, []byte(next), perm, info)
 	if errors.Is(err, syscall.EBUSY) || errors.Is(err, syscall.EXDEV) {
-		return rewriteInPlace(f, []byte(next))
+		err = rewriteInPlace(f, []byte(next))
 	}
-	return err
+	return false, err
 }
 
 // Block returns the body of the first managed block of path, empty when there is none
