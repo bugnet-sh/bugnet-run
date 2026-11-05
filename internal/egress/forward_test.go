@@ -215,7 +215,8 @@ func TestForwardStopsAtTheProxysAnswer(t *testing.T) {
 	}
 
 	first, second := sharedPort(t)
-	refusing, next := serveTunnel(t, p, testEndpoint, first), serveTunnel(t, p, testEndpoint, second)
+	refusing := serveTunnel(t, p, testEndpoint, first)
+	next := serveTunnel(t, p, testEndpoint, second)
 	refusing.status.Store(401)
 	cfg := testConfig(refusing)
 	cfg.IPs = []string{"127.0.0.1", second.Addr().(*net.TCPAddr).IP.String()}
