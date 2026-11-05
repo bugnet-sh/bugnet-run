@@ -41,7 +41,8 @@ func TestGateMissingOrWrongKeyIs404(t *testing.T) {
 	t.Parallel()
 	g := startGate(t)
 	port := appWith(t)
-	for _, key := range []string{"", "wrong", testKey[:42], testKey + "x"} {
+	eq(t, ValidKey(otherKey) && len(otherKey) == len(testKey) && otherKey != testKey, true)
+	for _, key := range []string{"", "wrong", testKey[:42], testKey + "x", otherKey} {
 		h := hdr(HeaderPort, strconv.Itoa(port))
 		if key != "" {
 			h.Set(HeaderKey, key)

@@ -23,7 +23,11 @@ import (
 	"github.com/oynozan/bugnet-run/internal/wsframe"
 )
 
-var testKey = base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{7}, 32))
+var (
+	testKey = base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{7}, 32))
+	// otherKey is a valid key of the same length that is not the gate's
+	otherKey = base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{9}, 32))
+)
 
 func eq[T any](t *testing.T, got, want T) {
 	t.Helper()
