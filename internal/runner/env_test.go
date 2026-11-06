@@ -12,6 +12,12 @@ type files map[string]string
 // prepared runs env as a job under a root holding files and returns the job's environment
 func prepared(t *testing.T, fs files, args ...string) map[string]string {
 	t.Helper()
+	return inheriting(t, nil, fs, args...)
+}
+
+// inheriting is prepared with inherited added to the environment the runner itself starts with
+func inheriting(t *testing.T, inherited []string, fs files, args ...string) map[string]string {
+	t.Helper()
 	root := t.TempDir()
 	for path, content := range fs {
 		full := filepath.Join(root, path)
@@ -23,7 +29,7 @@ func prepared(t *testing.T, fs files, args ...string) map[string]string {
 		}
 	}
 	args = append(append([]string{"--root", root}, args...), "--", "env")
-	res := startJob(t, t.TempDir(), "env", nil, args...).collect(t, 0, 0)
+	res := startJob(t, t.TempDir(), "env", inherited, args...).collect(t, 0, 0)
 	if x := res.mustExit(t); x.Code != 0 {
 		t.Fatalf("env exited %d, stderr %q", x.Code, res.stderr)
 	}
@@ -84,4 +90,14 @@ func TestPrepareSetsUTF8Locale(t *testing.T) {
 	env = prepared(t, files{}, "--env", "LC_ALL=POSIX")
 	eq(t, env["LANG"], "C.UTF-8")
 	eq(t, env["LC_ALL"], "POSIX")
+
+	// An LC_ALL the runner inherited would mask the locale the request names
+	inherited := []string{"LC_ALL=en_US.UTF-8"}
+	env = inheriting(t, inherited, files{}, "--env", "LANG=de_DE.UTF-8")
+	eq(t, env["LANG"], "de_DE.UTF-8")
+	eq(t, has(env, "LC_ALL"), false)
+
+	env = inheriting(t, inherited, files{})
+	eq(t, env["LANG"], "C.UTF-8")
+	eq(t, env["LC_ALL"], "C.UTF-8")
 }
