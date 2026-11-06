@@ -260,7 +260,7 @@ type upper struct {
 	usermod func(ctx context.Context, user string) error
 }
 
-// up makes SSH ready, writing nothing sshd reads until the check passes
+// up makes SSH ready, writing no sshd_config, port, key or sshd_path until sshd -t passes
 func (u upper) up(ctx context.Context, s Spec) (Result, error) {
 	if err := s.check(); err != nil {
 		return Result{}, fail(ErrBadSpec, err)

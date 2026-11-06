@@ -14,7 +14,7 @@ import (
 	"time"
 )
 
-// hupDelay is how long the old listener keeps answering after a SIGHUP, as when sshd acts on it late
+// hupDelay is how long the old listener answers after a SIGHUP, as when sshd acts on it late
 const hupDelay = 300 * time.Millisecond
 
 func main() {
