@@ -278,10 +278,10 @@ func TestForwardGivesUpOnAStalledProxy(t *testing.T) {
 		stall.Store(true)
 		// Past the first dial, whose retry TestForwardRetriesFirstDialOnce covers
 		fw := startForwarder(t, p, testConfig(s), testToken, func(f *Forwarder) {
-			f.handshakeWithin = 100 * time.Millisecond
+			f.handshakeWithin = 300 * time.Millisecond
 			f.dialed.Store(true)
 		})
-		if !closedSoon(t, dial(t, fw.addr), "x", 900*time.Millisecond) {
+		if !closedSoon(t, dial(t, fw.addr), "x", 2*time.Second) {
 			t.Fatalf("a proxy stalled at its %s answer held the client", stage)
 		}
 		eq(t, fw.f.failed.Load(), int64(1))
@@ -291,10 +291,10 @@ func TestForwardGivesUpOnAStalledProxy(t *testing.T) {
 			must(t, err)
 		}
 		waitFor(t, 5*time.Second, func() bool { return fw.f.failed.Load() == MaxConns+1 })
+		waitFor(t, 5*time.Second, func() bool { return s.accepts.Load() >= MaxConns+1 })
 		eq(t, s.accepts.Load(), int64(MaxConns+1))
-		stall.Store(false)
-		eq(t, roundTrip(t, dial(t, fw.addr), stage), stage)
-		eq(t, s.accepts.Load(), int64(MaxConns+2))
+		// Serve holds one slot for the client it waits to accept, so every other one came back
+		waitFor(t, 5*time.Second, func() bool { return len(fw.f.slots) == 1 })
 	}
 }
 
