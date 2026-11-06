@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -222,34 +223,46 @@ func TestSampleNeverMakesItsDirectory(t *testing.T) {
 	eq(t, errors.Is(err, os.ErrNotExist), true)
 }
 
+// waitFor polls cond until it holds, failing the test after five seconds
+func waitFor(t *testing.T, what string, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for !cond() {
+		if time.Now().After(deadline) {
+			t.Fatal(what)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
 func TestSampleRunWritesUntilStopped(t *testing.T) {
 	t.Parallel()
 	f := newFixture(t)
 	writeFile(t, filepath.Join(f.proc, "meminfo"), meminfo(5<<20, 0))
+	var readings atomic.Uint64
+	f.s.paths = func() []string {
+		readings.Add(1)
+		return nil
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() {
-		f.s.run(ctx, 10*time.Millisecond, 30*time.Millisecond, time.Hour)
+		// Only the first write is periodic, so the last file shows the write at the stop
+		f.s.run(ctx, 10*time.Millisecond, time.Hour, time.Hour)
 		close(done)
 	}()
-	deadline := time.Now().Add(5 * time.Second)
-	for {
+	waitFor(t, "run wrote no stats", func() bool {
 		b, err := os.ReadFile(f.s.out)
-		if err == nil && strings.Contains(string(b), `"mem_peak_mib":5120`) {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("run wrote no stats")
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
+		return err == nil && strings.Contains(string(b), `"mem_peak_mib":5120,`)
+	})
+	waitFor(t, "run took no third reading", func() bool { return readings.Load() >= 3 })
 	cancel()
 	<-done
 	var st Stats
 	b, err := os.ReadFile(f.s.out)
 	must(t, err)
 	must(t, json.Unmarshal(b, &st))
-	eq(t, st.Samples > 1, true)
+	eq(t, st.Samples >= 3, true)
 }
 
 func TestConfigIsStrict(t *testing.T) {
