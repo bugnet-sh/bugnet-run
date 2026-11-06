@@ -243,6 +243,53 @@ alone, with `UsePAM no`, and allows only local forwarding to loopback. Its one `
 the lines of `/etc/bugnet/env` and then `/etc/bugnet/secrets.env`, and `egress apply` keeps it
 current. Under `--root`, its paths are mapped under the root.
 
+`harden --spec FILE` blocks the sandbox's outbound mail, private ranges, metadata addresses and
+mining pools. It runs as root and never under `--root`. It reads the spec and deletes it, even
+when another argument is wrong:
+
+```json
+{"v": 1, "mail_ports": [25, 465, 587], "deny_ranges": ["10.0.0.0/8", "fe80::/10"],
+ "pools": ["198.51.100.0/24"], "allow": ["203.0.113.7"]}
+```
+
+Every entry of `deny_ranges`, `pools` and `allow` is a CIDR or a bare address. `pools` holds at
+most 10,000 entries, the others at most 1,000 and `mail_ports` at most 64.
+
+The rules apply to outbound traffic only. These are allowed first, in this order:
+
+- Loopback, and established or related traffic.
+- TCP and UDP port 53 of each `nameserver` in `/etc/resolv.conf` and
+  `/run/systemd/resolve/resolv.conf`, so a resolver in `10.0.0.0/8` keeps working.
+- The next hop of each default route in `/proc/net/route` and `/proc/net/ipv6_route`, the
+  default gateway even in a private range.
+- DHCP renewals (UDP 68 to 67, and 546 to 547), and IPv6 neighbour solicitations, neighbour
+  adverts and router solicitations, so the lease and IPv6 routing survive the blocks.
+- Each `allow` entry, the provider's own control addresses.
+
+Then these are dropped: TCP to each of `mail_ports` on any address, each `deny_ranges` entry, and
+each pool.
+
+1. When neither `nft` nor `iptables-restore` exists, it runs `apt-get update` and
+   `apt-get install -y --no-install-recommends nftables`, within 60 s for both. This runs before
+   the sandbox lock.
+2. With `nft`, it loads one table, `inet bugnet`, with `nft -f`. The file adds the table, deletes
+   it and makes it again in one transaction, so a second run leaves one table. Pools sit in the
+   interval sets `pools4` and `pools6`, with prefixes inside others left out.
+3. Without `nft`, or when `nft` fails, it refills a `BUGNET` chain with `iptables-restore
+   --noflush` and `ip6tables-restore --noflush`, and makes `OUTPUT` jump to it once. Without IPv6
+   in the kernel (no `/proc/net/if_inet6`), an IPv6 failure is ignored.
+4. It keeps what loaded in `/etc/bugnet/firewall.rules` (0644), renamed into place only after the
+   load. Its first line names the tool, `# bugnet-run harden nft` or `# bugnet-run harden
+   iptables`. The iptables file holds the IPv4 input, a `# ipv6` line and the IPv6 input.
+
+It prints `{"firewall":"nft"}` or `{"firewall":"iptables"}` and exits 0. On an error it prints
+one of these and exits 1:
+
+| Error | Cause |
+|---|---|
+| `bad_spec` | The spec is missing, malformed or fails a check, such as more than 10,000 pools |
+| `firewall_unavailable` | No tool could be installed, or the kernel or container refused it |
+
 `respawn [--root DIR]` starts the gate, the forwarder or our sshd when its config exists and its
 process is gone. It prints `{"started":["gate"]}`.
 

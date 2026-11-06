@@ -16,6 +16,7 @@ import (
 	"github.com/oynozan/bugnet-run/frame"
 	"github.com/oynozan/bugnet-run/internal/egress"
 	"github.com/oynozan/bugnet-run/internal/gate"
+	"github.com/oynozan/bugnet-run/internal/harden"
 	"github.com/oynozan/bugnet-run/internal/setup"
 	"github.com/oynozan/bugnet-run/internal/sshup"
 	"github.com/oynozan/bugnet-run/internal/xfer"
@@ -83,6 +84,8 @@ func Run(args []string, stdout, stderr io.Writer) int {
 		return egress.Forward(rest, stderr)
 	case "ssh-up":
 		return sshup.Run(rest, stdout, stderr)
+	case "harden":
+		return harden.Run(rest, stdout, stderr)
 	case "stat":
 		return xfer.Stat(rest, stdout, stderr)
 	case "stage-out":
