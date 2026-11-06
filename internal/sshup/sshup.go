@@ -260,7 +260,7 @@ type upper struct {
 	usermod func(ctx context.Context, user string) error
 }
 
-// up takes DP 6.4's steps in order, installing outside the lock so egress apply never waits on apt
+// up makes SSH ready, writing nothing sshd reads until the check passes
 func (u upper) up(ctx context.Context, s Spec) (Result, error) {
 	if err := s.check(); err != nil {
 		return Result{}, fail(ErrBadSpec, err)
@@ -268,6 +268,7 @@ func (u upper) up(ctx context.Context, s Spec) (Result, error) {
 	if err := makeDirs(u.root); err != nil {
 		return Result{}, fail(ErrSSHDFailed, err)
 	}
+	// The install runs before the sandbox lock, so egress apply never waits on apt
 	if err := u.ensureSSHD(ctx, s); err != nil {
 		return Result{}, err
 	}

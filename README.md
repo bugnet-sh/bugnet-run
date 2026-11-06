@@ -167,8 +167,8 @@ Then, in this order:
    lock, under an `flock` of `/etc/bugnet/ssh` that only this step takes. A second run waits
    there and then finds sshd in place.
 2. Under the sandbox lock, it removes the dot-files in `/etc/bugnet/ssh` that a killed run left.
-3. It keeps the port of our running sshd. Otherwise it binds `127.0.0.1` on each of `ports` in
-   turn for a moment and takes the first that binds.
+3. It keeps the port of our running sshd while that port is still in `ports`. Otherwise it binds
+   `127.0.0.1` on each of `ports` in turn for a moment and takes the first that binds.
 4. It keeps `/etc/bugnet/ssh/host_ed25519_key` when it holds a readable key, and sets it to 0600.
    Otherwise, or with `--new-host-key`, it writes a new key (0600) to a temporary file beside it.
 5. It adds each `authorize` line to `/etc/bugnet/ssh/authorized_keys` (0644) unless it is there.
