@@ -667,10 +667,13 @@ func (s supervised) Check(ctx context.Context, sshdPath string, config []byte) e
 	defer cancel()
 	out, err := exec.CommandContext(ctx, sshdPath, "-t", "-f", tmp.Name()).CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("sshd -t refused the config: %w: %s", err, redact(tail(out)))
+		return fmt.Errorf("sshd -t refused the config: %w: %s", err, complaint(out))
 	}
 	return nil
 }
+
+// complaint is sshd's output for stderr, cut only once no placeholder body is left in it
+func complaint(out []byte) []byte { return tail(redact(out)) }
 
 // redact drops each placeholder's body, so sshd quoting our SetEnv line never logs one
 func redact(b []byte) []byte {

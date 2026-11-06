@@ -603,4 +603,14 @@ func TestRedact(t *testing.T) {
 	eq(t, string(redact([]byte("A=bnsec_abcz234567 B=bnsec_ C=bnsec_x9 bnsec"))),
 		"A=bnsec_ B=bnsec_ C=bnsec_9 bnsec")
 
+	// The last 1 KiB starts inside the prefix or at the body, which a cut first would let through
+	body := strings.Repeat("c", 26)
+	for cut := range len("bnsec_") + 1 {
+		out := "X=bnsec_" + body + " " + strings.Repeat("p", 1024+cut-len(body)-len("bnsec_")-1)
+		eq(t, len(out)-1024, len("X=")+cut)
+		got := string(complaint([]byte(out)))
+		if strings.Contains(got, "ccc") {
+			t.Fatalf("a cut %d bytes into the prefix kept the body: %q", cut, got[:40])
+		}
+	}
 }
