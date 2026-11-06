@@ -42,11 +42,11 @@ func main() {
 	}
 	logPath := filepath.Join(filepath.Dir(cfgPath), "fake-sshd.log")
 	ln := listen(cfg)
+	record(logPath, "start "+cfg["port"])
 	pidFile := cfg["pidfile"]
 	if err := os.WriteFile(pidFile, []byte(strconv.Itoa(os.Getpid())+"\n"), 0o644); err != nil {
 		die("pid file")
 	}
-	record(logPath, "start "+cfg["port"])
 	signals := make(chan os.Signal, 4)
 	signal.Notify(signals, syscall.SIGHUP, syscall.SIGTERM)
 	for sig := range signals {
