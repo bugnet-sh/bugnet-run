@@ -290,6 +290,29 @@ func TestPlaceCrossDevice(t *testing.T) {
 	eq(t, len(mustReadDir(t, filepath.Dir(target))), 1)
 }
 
+func TestPlaceNeverFollowsASwappedSource(t *testing.T) {
+	dir := t.TempDir()
+	staged := filepath.Join(dir, "staged", "f")
+	writeFile(t, staged, "upload", 0o600)
+	victim := filepath.Join(dir, "etc", "shadow")
+	writeFile(t, victim, "secret", 0o600)
+	target := filepath.Join(dir, "opt", "f")
+	withAfterOpen(t, func(*os.File) {
+		must(t, os.Rename(staged, staged+".opened"))
+		must(t, os.Symlink(victim, staged))
+	})
+	line, code := call(t, Place, "--from", staged, "--to", target, "--mode", "0644")
+	eq(t, line, `{"error":"place_failed"}`)
+	eq(t, code, 1)
+	fi, err := os.Stat(victim)
+	must(t, err)
+	eq(t, fi.Mode().Perm(), fs.FileMode(0o600))
+	eq(t, readFile(t, victim), "secret")
+	fi, err = os.Stat(staged + ".opened")
+	must(t, err)
+	eq(t, fi.Mode().Perm(), fs.FileMode(0o644))
+}
+
 func TestPlaceCreatesParentsAndReplaces(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
@@ -333,6 +356,21 @@ func TestPlaceCreatesParentsAndReplaces(t *testing.T) {
 		eq(t, code, 1)
 	}
 	eq(t, readFile(t, staged), "three")
+
+	fifo := filepath.Join(dir, "pipe")
+	must(t, syscall.Mkfifo(fifo, 0o600))
+	code := make(chan string, 1)
+	go func() {
+		var out bytes.Buffer
+		Place([]string{"--from", fifo, "--to", filepath.Join(dir, "x")}, &out, io.Discard)
+		code <- out.String()
+	}()
+	select {
+	case line := <-code:
+		eq(t, line, `{"error":"not_regular"}`+"\n")
+	case <-time.After(5 * time.Second):
+		t.Fatal("place of a FIFO hangs")
+	}
 
 	for _, m := range []string{"644x", "999", "0o644", "1777", "04755", "-1", ""} {
 		line, code := call(t, Place, "--from", staged, "--to", target, "--mode", m)

@@ -90,7 +90,8 @@ func TestContainerTransferHelpersAsRoot(t *testing.T) {
 				"/mnt/etc/app/conf", "--mode", "0640")), &got))
 			eq(t, got.Size, int64(3))
 			eq(t, got.Mode, uint32(0o640))
-			eq(t, inContainer(t, id, "stat -c '%U %G %a' /mnt/etc/app/conf"), "root root 640")
+			// A new file keeps the staged file's owner, as sudo mv would
+			eq(t, inContainer(t, id, "stat -c '%U %G %a' /mnt/etc/app/conf"), "bx bx 640")
 			eq(t, inContainer(t, id, "stat -c '%a' /mnt/etc /mnt/etc/app"), "755\n755")
 			eq(t, inContainer(t, id, "test -e "+upload+" && echo left || echo gone"), "gone")
 			eq(t, inContainer(t, id, "ls -A /mnt/etc/app"), "conf")

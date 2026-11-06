@@ -296,26 +296,34 @@ func place(args []string) (Info, error) {
 		return Info{}, err
 	}
 
-	si, err := os.Lstat(src)
+	// Changes go through this descriptor, so a path swapped meanwhile never gets root's chmod
+	in, err := os.OpenFile(src, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
 	switch {
 	case missing(err):
 		return Info{}, fail(ErrNotFound, err)
+	case errors.Is(err, syscall.ELOOP):
+		return Info{}, fail(ErrNotRegular, errors.New("--from is a symlink"))
 	case err != nil:
+		return Info{}, fail(ErrPlaceFailed, err)
+	}
+	defer func() { _ = in.Close() }()
+	si, err := in.Stat()
+	if err != nil {
 		return Info{}, fail(ErrPlaceFailed, err)
 	}
 	if err := regular(si); err != nil {
 		return Info{}, err
 	}
-	uid, gid := os.Geteuid(), os.Getegid()
+	afterOpen(in)
+	// A new file keeps the staged file's owner, as sudo mv would
+	uid, gid := ownerOf(si)
 	di, err := os.Lstat(dst)
 	switch {
 	case err == nil && di.IsDir():
 		return Info{}, fail(ErrIsDirectory, errors.New("--to is a directory"))
 	case err == nil && di.Mode().IsRegular():
 		// A replaced file keeps its owner, as cp onto it would
-		if st, ok := di.Sys().(*syscall.Stat_t); ok {
-			uid, gid = int(st.Uid), int(st.Gid)
-		}
+		uid, gid = ownerOf(di)
 	case err != nil && !errors.Is(err, fs.ErrNotExist):
 		return Info{}, fail(ErrPlaceFailed, err)
 	}
@@ -324,15 +332,17 @@ func place(args []string) (Info, error) {
 		return Info{}, fail(ErrPlaceFailed, err)
 	}
 	// The staged file gets its final owner and mode first, so the target never shows the user's
-	if err := os.Lchown(src, uid, gid); err != nil {
+	if err := in.Chown(uid, gid); err != nil {
 		return Info{}, fail(ErrPlaceFailed, err)
 	}
-	if err := os.Chmod(src, perm); err != nil {
+	if err := in.Chmod(perm); err != nil {
 		return Info{}, fail(ErrPlaceFailed, err)
 	}
+	copied := false
 	err = rename(src, dst)
 	if errors.Is(err, syscall.EXDEV) {
-		err = copyBeside(src, dst, uid, gid, perm)
+		copied = true
+		err = copyBeside(in, si, dst, uid, gid, perm)
 		if err == nil {
 			err = os.Remove(src)
 		}
@@ -340,7 +350,22 @@ func place(args []string) (Info, error) {
 	if err != nil {
 		return Info{}, fail(ErrPlaceFailed, err)
 	}
-	return statPlaced(dst, ErrPlaceFailed)
+	placed, err := os.Lstat(dst)
+	if err != nil {
+		return Info{}, fail(ErrPlaceFailed, err)
+	}
+	if !copied && !os.SameFile(si, placed) {
+		return Info{}, fail(ErrPlaceFailed, errors.New("--from was replaced while it was placed"))
+	}
+	return infoOf(dst, placed), nil
+}
+
+func ownerOf(fi fs.FileInfo) (int, int) {
+	st, ok := fi.Sys().(*syscall.Stat_t)
+	if !ok {
+		return os.Geteuid(), os.Getegid()
+	}
+	return int(st.Uid), int(st.Gid)
 }
 
 // parseMode accepts permission bits alone, so an upload never sets setuid or setgid
@@ -352,17 +377,8 @@ func parseMode(text string) (fs.FileMode, error) {
 	return fs.FileMode(m), nil
 }
 
-// copyBeside copies src into a temporary file in dst's directory, then renames it over dst
-func copyBeside(src, dst string, uid, gid int, perm fs.FileMode) error {
-	in, err := os.OpenFile(src, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = in.Close() }()
-	fi, err := in.Stat()
-	if err != nil {
-		return err
-	}
+// copyBeside copies in into a temporary file in dst's directory, then renames it over dst
+func copyBeside(in *os.File, fi fs.FileInfo, dst string, uid, gid int, perm fs.FileMode) error {
 	return writeBeside(dst, perm, fi.ModTime(), func(tmp *os.File) error {
 		if err := tmp.Chown(uid, gid); err != nil {
 			return err

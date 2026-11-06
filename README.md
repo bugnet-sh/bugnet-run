@@ -249,10 +249,13 @@ trailing slash never makes a final symlink count.
 `place --from S --to P [--mode 0644]` moves a staged upload over `P`:
 
 - It creates the missing parents of `P` (0755).
-- The file gets `--mode` and keeps the owner of the file it replaces. A new file belongs to the
-  user running `place`, root under sudo. Modes above 0777 are refused.
-- It renames `S` over `P`. When they sit on different filesystems, it copies `S` beside `P`,
-  renames the copy over `P` and deletes `S`.
+- It opens `S` once without following a symlink, and sets the owner and mode through that open
+  file, so a path swapped meanwhile is never changed.
+- The file gets `--mode` and keeps the owner of the file it replaces. A new file keeps the owner
+  of `S`, as `sudo mv` would. Modes above 0777 are refused.
+- It renames `S` over `P`. When they sit on different filesystems, it copies the open file
+  beside `P`, renames the copy over `P` and deletes `S`. When the renamed file is not the one it
+  opened, it answers `place_failed`.
 - It prints the fields of the placed file.
 
 | Error | Exit | Cause |
