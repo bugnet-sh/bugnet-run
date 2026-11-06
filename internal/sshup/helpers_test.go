@@ -21,7 +21,7 @@ import (
 	"github.com/oynozan/bugnet-run/internal/sandbox"
 )
 
-// gwLine is the gateway's authorized_keys line as Task 19 writes it
+// gwLine is the gateway's authorized_keys line as the router writes it
 const gwLine = `restrict,pty,port-forwarding,permitopen="127.0.0.1:*",permitopen="[::1]:*" ` +
 	"ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl bn-gw"
 
@@ -199,7 +199,7 @@ type fixture struct {
 	system   bool
 	mu       sync.Mutex
 	installs []time.Duration
-	// installErr fails the fake apt-get, and installs creates sshd when it is nil
+	// installErr fails the fake apt-get, which otherwise creates sshd
 	installErr error
 	usermods   []string
 	systemctl  []string

@@ -238,7 +238,7 @@ type daemon interface {
 	Restart(ctx context.Context) error
 	// Reload sends SIGHUP, which makes sshd read its config and host key again
 	Reload() error
-	// Wait returns once 127.0.0.1:port accepts, or after its wait
+	// Wait returns once the port accepts on 127.0.0.1, or after its wait
 	Wait(ctx context.Context, port int) error
 }
 
@@ -373,7 +373,7 @@ func (u upper) pickPort(ports []int) (int, bool) {
 	return 0, false
 }
 
-// probePort binds 127.0.0.1:port for a moment, which fails while any sshd listens on it
+// probePort binds the port on 127.0.0.1 for a moment, which fails while any sshd listens on it
 func probePort(port int) bool {
 	ln, err := net.Listen("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)))
 	if err != nil {

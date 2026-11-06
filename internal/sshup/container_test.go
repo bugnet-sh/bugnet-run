@@ -92,7 +92,7 @@ func linuxRunner(t *testing.T) string {
 var (
 	imagesMu sync.Mutex
 	images   = map[string]string{}
-	// cleanups run after every test, removing the images and files the container tests made
+	// cleanups run once every test has finished, removing what the container tests made
 	cleanups []func()
 )
 
@@ -200,7 +200,7 @@ func containerSpec(user string) Spec {
 	}
 }
 
-// holdPort22 runs a gate on :22 from a scratch root, standing in for a distro sshd
+// holdPort22 runs a gate on port 22 from a scratch root, standing in for a distro sshd
 func holdPort22(t *testing.T, id string) {
 	t.Helper()
 	key := base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{8}, 32))
