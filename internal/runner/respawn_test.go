@@ -150,6 +150,109 @@ func TestRespawnCommand(t *testing.T) {
 	waitFor(t, 5*time.Second, func() bool { return healthy(addr) })
 }
 
+// deadGate gives a test a root setup ran whose gate it then killed
+func deadGate(t *testing.T) (*services, string) {
+	t.Helper()
+	s, addr := setupGate(t)
+	pid, err := sandbox.ReadPidFile(s.root, "gate")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.end(t, pid, syscall.SIGKILL)
+	return s, addr
+}
+
+func TestRespawnCopiesAMissingRunnerBeforeTheGate(t *testing.T) {
+	t.Parallel()
+	s, addr := deadGate(t)
+	root := s.root
+	runner := root.Path(sandbox.RunnerPath)
+	if err := os.Remove(runner); err != nil {
+		t.Fatal(err)
+	}
+
+	eq(t, strings.TrimSpace(string(runRaw(t, "respawn", "--root", root.Dir()))),
+		`{"started":["gate"]}`)
+	info, err := os.Stat(runner)
+	if err != nil {
+		t.Fatalf("respawn started the gate without copying the runner: %v", err)
+	}
+	built, err := os.Stat(binPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	eq(t, info.Mode().Perm(), os.FileMode(0o755))
+	eq(t, os.SameFile(info, built), false)
+	eq(t, bytes.Equal(readFile(t, runner), readFile(t, binPath)), true)
+	// macOS checks a new copy before its first run, which can take seconds
+	waitFor(t, 30*time.Second, func() bool { return healthy(addr) })
+	pid, err := sandbox.ReadPidFile(root, "gate")
+	if err != nil {
+		t.Fatal(err)
+	}
+	eq(t, strings.HasPrefix(command(t, pid), runner+" gate --config "), true)
+}
+
+func TestRespawnWhoseCopyFailsStartsTheCopyInPlace(t *testing.T) {
+	t.Parallel()
+	if os.Geteuid() == 0 {
+		t.Skip("root reads a file whatever its mode, so the copy never fails")
+	}
+	s, addr := deadGate(t)
+	root := s.root
+	// A runner that may run but not be read is one the copy cannot open
+	exe := filepath.Join(t.TempDir(), "bugnet-run")
+	if err := os.WriteFile(exe, readFile(t, binPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(exe, 0o111); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := exec.Command(exe, "respawn", "--root", root.Dir())
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
+	eq(t, exitCode(err), 1)
+	eq(t, strings.TrimSpace(string(out)), `{"started":["gate"],"error":"respawn_failed"}`)
+	eq(t, strings.Contains(stderr.String(), "install the runner: "), true)
+	waitFor(t, 5*time.Second, func() bool { return healthy(addr) })
+	runner := root.Path(sandbox.RunnerPath)
+	info, err := os.Stat(runner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	built, err := os.Stat(binPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	eq(t, os.SameFile(info, built), true)
+	pid, err := sandbox.ReadPidFile(root, "gate")
+	if err != nil {
+		t.Fatal(err)
+	}
+	eq(t, strings.HasPrefix(command(t, pid), runner+" gate --config "), true)
+}
+
+func readFile(t *testing.T, path string) []byte {
+	t.Helper()
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
+}
+
+// command is the command line ps shows for pid
+func command(t *testing.T, pid int) string {
+	t.Helper()
+	out, err := exec.Command("ps", "-o", "command=", "-p", strconv.Itoa(pid)).Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return strings.TrimSpace(string(out))
+}
+
 func TestRespawnSkipsWhileSetupHoldsTheLock(t *testing.T) {
 	t.Parallel()
 	s, addr := setupGate(t)
