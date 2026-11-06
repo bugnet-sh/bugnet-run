@@ -351,7 +351,13 @@ func TestClaimServiceLetsOneProcessHoldIt(t *testing.T) {
 	gate()
 
 	release()
+	// A child that another test forks holds a copy of the lock until its exec, so retry briefly
+	deadline := time.Now().Add(time.Second)
 	release, ok, err = ClaimService(r, "sample")
+	for err == nil && !ok && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+		release, ok, err = ClaimService(r, "sample")
+	}
 	must(t, err)
 	eq(t, ok, true)
 	release()
