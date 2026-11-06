@@ -1,9 +1,12 @@
 package harden
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -149,6 +152,25 @@ func TestBadSpec(t *testing.T) {
 			t.Parallel()
 			f := newFixture(t)
 			eq(t, f.runRaw(t, []byte(raw)), `{"error":"bad_spec"}`)
+			eq(t, f.fakes.take(), []call(nil))
+		})
+	}
+}
+
+func TestWrongArgumentAfterTheSpecStillDeletesIt(t *testing.T) {
+	t.Parallel()
+	for name, extra := range map[string]string{"unknown flag": "--bogus", "extra": "extra"} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			f := newFixture(t)
+			path := filepath.Join(t.TempDir(), "harden-spec.json")
+			writeFile(t, path, `{"v":1}`)
+			var out bytes.Buffer
+			code := f.h.main(t.Context(), []string{"--spec", path, extra}, &out, io.Discard)
+			eq(t, code, 1)
+			eq(t, out.String(), "{\"error\":\"bad_spec\"}\n")
+			_, err := os.Stat(path)
+			eq(t, errors.Is(err, os.ErrNotExist), true)
 			eq(t, f.fakes.take(), []call(nil))
 		})
 	}
