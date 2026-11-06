@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -463,5 +464,58 @@ func sameAs[T any](t *testing.T, got, want T) {
 	t.Helper()
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("got %#v, want %#v", got, want)
+	}
+}
+
+func TestRespawnStartsDeadSampler(t *testing.T) {
+	t.Parallel()
+	root, err := sandbox.NewRoot(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	config := root.Path(sandbox.SampleConfig)
+	if err := os.MkdirAll(filepath.Dir(config), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(config, []byte(`{"v":1}`+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// The sampler writes into the job directory's parent, which it never makes itself
+	if err := os.MkdirAll(root.Path("/tmp/bugnet"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	var stopped []int
+	t.Cleanup(func() {
+		if pid, err := sandbox.ReadPidFile(root, "sample"); err == nil &&
+			!slices.Contains(stopped, pid) {
+			_ = syscall.Kill(pid, syscall.SIGTERM)
+			waitFor(t, 5*time.Second, func() bool { return gone(pid) })
+		}
+	})
+	sampler := func() int {
+		var pid int
+		waitFor(t, 5*time.Second, func() bool {
+			pid, err = sandbox.ReadPidFile(root, "sample")
+			return err == nil && !gone(pid)
+		})
+		return pid
+	}
+
+	eq(t, strings.TrimSpace(string(runRaw(t, "respawn", "--root", root.Dir()))),
+		`{"started":["sample"]}`)
+	pid := sampler()
+	waitFor(t, 5*time.Second, func() bool { return exists(root.Path("/tmp/bugnet/stats.json")) })
+	eq(t, strings.TrimSpace(string(runRaw(t, "respawn", "--root", root.Dir()))),
+		`{"started":[]}`)
+
+	if err := syscall.Kill(pid, syscall.SIGKILL); err != nil {
+		t.Fatal(err)
+	}
+	stopped = append(stopped, pid)
+	waitFor(t, 5*time.Second, func() bool { return gone(pid) })
+	startJob(t, t.TempDir(), "after", nil, "--root", root.Dir(), "--", "true").collect(t, 0, 0).
+		mustExit(t)
+	if again := sampler(); again == pid {
+		t.Fatalf("the dead sampler's pid %d is still recorded", pid)
 	}
 }

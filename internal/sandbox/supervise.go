@@ -64,6 +64,12 @@ var SSHD = Service{
 	},
 }
 
+// Sample is the bugnet-run sampler that records the whole sandbox's peaks
+var Sample = Service{
+	Name: "sample", Config: SampleConfig, description: "Bugnet sampler", runtimeDirs: "bugnet",
+	marker: "\x00sample\x00", argv: runnerArgv("sample", SampleConfig),
+}
+
 // DefaultSSHDPath is the sshd Debian and Ubuntu install
 const DefaultSSHDPath = "/usr/sbin/sshd"
 
@@ -81,7 +87,7 @@ func SSHDPath(r Root) string {
 }
 
 // Services lists every service respawn brings back, in start order
-var Services = []Service{Gate, Forward, SSHD}
+var Services = []Service{Gate, Forward, SSHD, Sample}
 
 func runnerArgv(sub, config string) func(Root, string) []string {
 	return func(r Root, exe string) []string {

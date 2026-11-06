@@ -34,7 +34,8 @@ type Spec struct {
 	CASHA256      string `json:"ca_sha256"`
 	CAVersion     int    `json:"ca_version"`
 	PreviewDomain string `json:"preview_domain"`
-	Sample        bool   `json:"sample"`
+	// Sample starts the sampler, which a later setup without it leaves running
+	Sample bool `json:"sample"`
 }
 
 // Result is the one JSON line setup prints
@@ -94,7 +95,7 @@ func fail(reason string, err error) error { return &failure{reason: reason, err:
 
 // Run is bugnet-run setup, printing one JSON line and exiting 1 on any error
 func Run(args []string, stdout, stderr io.Writer) int {
-	res, err := run(context.Background(), args)
+	res, err := run(context.Background(), args, stderr)
 	status := 0
 	if err != nil {
 		reason := ErrGateFailed
@@ -110,7 +111,7 @@ func Run(args []string, stdout, stderr io.Writer) int {
 	return status
 }
 
-func run(ctx context.Context, args []string) (Result, error) {
+func run(ctx context.Context, args []string, stderr io.Writer) (Result, error) {
 	flags := flag.NewFlagSet("setup", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
 	specPath := flags.String("spec", "", "spec file, deleted once read")
@@ -167,8 +168,23 @@ func run(ctx context.Context, args []string) (Result, error) {
 	if err := startGate(ctx, sup, cfg, key, changed); err != nil {
 		return Result{}, fail(ErrGateFailed, err)
 	}
+	// The sampler only feeds the estimator, so a sandbox without one is still ready
+	if !*repair && spec.Sample {
+		if err := startSampler(ctx, sup); err != nil {
+			_, _ = fmt.Fprintf(stderr, "bugnet-run setup: sampler: %v\n", err)
+		}
+	}
 	res.Gate, res.Init = "listening", string(sup.Init())
 	return res, nil
+}
+
+// startSampler writes sample.json and starts the sampler, leaving a running one alone
+func startSampler(ctx context.Context, sup sandbox.Supervisor) error {
+	if _, err := sandbox.WriteFile(sup.Root.Path(sandbox.SampleConfig), []byte("{\"v\":1}\n"),
+		0o644); err != nil {
+		return err
+	}
+	return sup.Start(ctx, sandbox.Sample)
 }
 
 /* Spec */

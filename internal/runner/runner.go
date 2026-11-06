@@ -17,6 +17,7 @@ import (
 	"github.com/oynozan/bugnet-run/internal/egress"
 	"github.com/oynozan/bugnet-run/internal/gate"
 	"github.com/oynozan/bugnet-run/internal/harden"
+	"github.com/oynozan/bugnet-run/internal/sample"
 	"github.com/oynozan/bugnet-run/internal/setup"
 	"github.com/oynozan/bugnet-run/internal/sshup"
 	"github.com/oynozan/bugnet-run/internal/xfer"
@@ -86,6 +87,8 @@ func Run(args []string, stdout, stderr io.Writer) int {
 		return sshup.Run(rest, stdout, stderr)
 	case "harden":
 		return harden.Run(rest, stdout, stderr)
+	case "sample":
+		return sample.Run(rest, stderr)
 	case "stat":
 		return xfer.Stat(rest, stdout, stderr)
 	case "stage-out":

@@ -366,3 +366,82 @@ func TestSetupWaitsForTheSandboxLock(t *testing.T) {
 		t.Fatal("setup did not finish once the lock was free")
 	}
 }
+
+// samplerPid waits for the sampler setup started to record itself
+func (f *fixture) samplerPid(t *testing.T) int {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		pid, err := sandbox.ReadPidFile(f.root, "sample")
+		if err == nil && alive(pid) {
+			return pid
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("no sampler runs: %v", err)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func TestSetupStartsTheSampler(t *testing.T) {
+	f := newFixture(t)
+	s := f.spec()
+	s.Sample = true
+	out, code := f.run(t, s)
+	eq(t, out, `{"gate":"listening","ca":"skipped","init":"setsid"}`)
+	eq(t, code, 0)
+	eq(t, readFile(t, f.root.Path(sandbox.SampleConfig)), "{\"v\":1}\n")
+	info, err := os.Stat(f.root.Path(sandbox.SampleConfig))
+	must(t, err)
+	eq(t, info.Mode().Perm(), os.FileMode(0o644))
+	pid := f.samplerPid(t)
+
+	_, code = f.run(t, s)
+	eq(t, code, 0)
+	eq(t, f.samplerPid(t), pid)
+
+	// A repair touches only the gate
+	_, code = f.run(t, nil, "--repair")
+	eq(t, code, 0)
+	eq(t, f.samplerPid(t), pid)
+}
+
+func TestSetupWithoutSampleStartsNone(t *testing.T) {
+	f := newFixture(t)
+	_, code := f.run(t, f.spec())
+	eq(t, code, 0)
+	eq(t, exists(f.root.Path(sandbox.SampleConfig)), false)
+	_, err := sandbox.ReadPidFile(f.root, "sample")
+	eq(t, err != nil, true)
+}
+
+func TestSetupSamplerUnderSystemd(t *testing.T) {
+	f := newFixture(t)
+	must(t, os.MkdirAll(f.root.Path(sandbox.SystemdDir), 0o755))
+	fake := fakeSystemctl(t, f.root)
+	s := f.spec()
+	s.Sample = true
+	_, code := f.run(t, s)
+	eq(t, code, 0)
+	eq(t, fake.take(), []string{
+		"daemon-reload", "enable --quiet bugnet-gate.service", "reset-failed bugnet-gate.service",
+		"restart bugnet-gate.service", "daemon-reload", "enable --quiet bugnet-sample.service",
+		"reset-failed bugnet-sample.service", "start bugnet-sample.service",
+	})
+	unit := readFile(t, f.root.Path(sandbox.UnitDir+"/bugnet-sample.service"))
+	want := "ExecStart=" + binPath + " sample --config " + f.root.Path(sandbox.SampleConfig) +
+		" --root " + f.root.Dir() + "\n"
+	eq(t, strings.Contains(unit, want), true)
+	f.samplerPid(t)
+}
+
+func TestSetupSamplerFailureNeverFailsSetup(t *testing.T) {
+	f := newFixture(t)
+	// A directory where the config goes cannot be written over
+	must(t, os.MkdirAll(f.root.Path(sandbox.SampleConfig), 0o755))
+	s := f.spec()
+	s.Sample = true
+	out, code := f.run(t, s)
+	eq(t, out, `{"gate":"listening","ca":"skipped","init":"setsid"}`)
+	eq(t, code, 0)
+}

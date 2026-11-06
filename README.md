@@ -80,6 +80,9 @@ These run as root. `--root DIR` maps every sandbox path under `DIR`, for the `lo
 2. Installs the Bugnet CA as `/usr/local/share/ca-certificates/bugnet-egress-v<N>.crt`.
 3. Writes `/etc/bugnet/env` and `/etc/profile.d/bugnet.sh`.
 4. Starts the gate, under systemd when `/run/systemd/system` exists, else with `setsid`.
+5. With `"sample": true`, writes `/etc/bugnet/sample.json` (0644) and starts the sampler, the
+   same way. A sampler that does not start is logged on stderr and never fails setup. A later
+   setup without `sample` leaves a running sampler alone.
 
 It prints `{"gate":"listening","ca":"installed","init":"systemd"}` and exits 0 once the gate
 answers its health route. On an error it prints one of these and exits 1:
@@ -293,8 +296,40 @@ one of these and exits 1:
 | `bad_spec` | The spec is missing, malformed or fails a check, such as more than 10,000 pools |
 | `firewall_unavailable` | No tool could be installed, or the kernel or container refused it |
 
-`respawn [--root DIR]` starts the gate, the forwarder or our sshd when its config exists and its
-process is gone. It prints `{"started":["gate"]}`.
+`sample [--config /etc/bugnet/sample.json] [--root DIR]` records the whole sandbox's peaks for the
+router's estimator. Its config is `{"v":1}`, read strictly. It writes `/run/bugnet/sample.pid`,
+and then:
+
+- Every second it reads `/proc/meminfo`, the `oom_kill` count in `/proc/vmstat` and the `cpu`
+  lines of `/proc/stat`, and it runs `statfs` on `/`, `/tmp`, `/root` and each directory in
+  `/home`. A filesystem counts once, and `tmpfs` not at all, since memory already counts it.
+- Every 5 s it runs `nvidia-smi --query-gpu=memory.used,memory.total
+  --format=csv,noheader,nounits` when that exists, within 3 s.
+- At the first reading, every 5 s and at `SIGTERM`, it writes `/tmp/bugnet/stats.json` (0644)
+  through a temporary file renamed over it. It never makes `/tmp/bugnet`, which the exec user
+  owns, and skips the write while that is missing.
+
+```json
+{"v": 1, "mem_peak_mib": 700, "swap_peak_mib": 0, "disk_peak_mib": 400, "cpu_seconds": 4,
+ "busy_p95_millicores": 2000, "gpu_mem_peak_mib": 0, "oom_kills": 0, "samples": 5,
+ "updated_at": "2026-11-06T12:00:04Z"}
+```
+
+| Field | Meaning |
+|---|---|
+| `mem_peak_mib` | The peak of `MemTotal` minus `MemAvailable`, rounded up |
+| `swap_peak_mib` | The peak of `SwapTotal` minus `SwapFree`, rounded up |
+| `disk_peak_mib` | The peak of used bytes above those at the sampler's start, never below 0 |
+| `cpu_seconds` | Busy CPU time since the start: user, nice, system, irq and softirq |
+| `busy_p95_millicores` | The 95th percentile of each second's busy CPU, 1000 per core, to 10 |
+| `gpu_mem_peak_mib` | The peak of `memory.used` summed over the GPUs, 0 without `nvidia-smi` |
+| `oom_kills` | The growth of the `oom_kill` count since the start |
+| `samples`, `updated_at` | How many readings, and the last one's time in UTC |
+
+Every number is whole. A source the sandbox lacks is skipped, and its fields stay 0.
+
+`respawn [--root DIR]` starts the gate, the forwarder, our sshd or the sampler when its config
+exists and its process is gone. It prints `{"started":["gate"]}`.
 
 It also puts the firewall back. When `/etc/bugnet/firewall.rules` exists and the last check is a
 minute old or more, it checks that the table is loaded: `nft list tables` shows `table inet
@@ -308,6 +343,7 @@ minute. Root can still remove the table between jobs.
 | `bugnet-gate` | `/etc/bugnet/gate.json` | `/run/bugnet/gate.pid` |
 | `bugnet-forward` | `/etc/bugnet/egress.json` | `/run/bugnet/forward.pid` |
 | `bugnet-sshd` | `/etc/bugnet/ssh/sshd_config` | `/run/bugnet/sshd.pid` |
+| `bugnet-sample` | `/etc/bugnet/sample.json` | `/run/bugnet/sample.pid` |
 
 Our sshd runs `<sshd_path> -D -e -f /etc/bugnet/ssh/sshd_config`, where `sshd_path` is the one
 `ssh-up` recorded, else `/usr/sbin/sshd`. sshd writes its own pid file. Respawn first makes

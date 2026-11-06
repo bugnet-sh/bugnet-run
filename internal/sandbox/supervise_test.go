@@ -41,6 +41,10 @@ func TestUnitText(t *testing.T) {
 		eq(t, slices.Contains(strings.Split(sshd, "\n"), line), true)
 	}
 
+	eq(t, strings.Contains(s.unit(Sample), "Description=Bugnet sampler\n"), true)
+	eq(t, strings.Contains(s.unit(Sample), "ExecStart=/tmp/bugnet/bin/bugnet-run sample "+
+		"--config /etc/bugnet/sample.json\n"), true)
+
 	local := Supervisor{Root: Root{dir: "/s/fs"}, Exe: "/opt/bn run/bugnet-run"}
 	eq(t, strings.Contains(local.unit(Forward), "ExecStart=\"/opt/bn run/bugnet-run\" forward "+
 		"--config /s/fs/etc/bugnet/egress.json --root /s/fs\n"), true)
@@ -120,6 +124,8 @@ func TestDeadListsConfiguredServicesWithoutProcess(t *testing.T) {
 	eq(t, names(s.Dead()), []string{"gate", "sshd"})
 	writeFile(t, r.Path(EgressConfig), "{}")
 	eq(t, names(s.Dead()), []string{"gate", "forward", "sshd"})
+	writeFile(t, r.Path(SampleConfig), `{"v":1}`)
+	eq(t, names(s.Dead()), []string{"gate", "forward", "sshd", "sample"})
 }
 
 type fakeSystemctl struct {

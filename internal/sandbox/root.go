@@ -36,6 +36,7 @@ const (
 	SystemdDir     = "/run/systemd/system"
 	UnitDir        = "/etc/systemd/system"
 	SSHDRunDir     = "/run/sshd"
+	SampleConfig   = "/etc/bugnet/sample.json"
 )
 
 // Root maps sandbox paths under a directory, which is / in a real sandbox

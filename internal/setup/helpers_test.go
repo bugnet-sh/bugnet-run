@@ -171,15 +171,17 @@ func (f *fixture) healthy(key string) error {
 	return gate.Healthy(ctx, fmt.Sprintf("127.0.0.1:%d", f.port), key)
 }
 
-// stopGate ends the gate this fixture's setup started, a process the test owns
+// stopGate ends the gate and the sampler this fixture's setup started, processes the test owns
 func (f *fixture) stopGate(t *testing.T) {
 	t.Helper()
-	pid, err := sandbox.ReadPidFile(f.root, "gate")
-	if err != nil {
-		return
+	for _, name := range []string{"gate", "sample"} {
+		pid, err := sandbox.ReadPidFile(f.root, name)
+		if err != nil || !alive(pid) {
+			continue
+		}
+		_ = syscall.Kill(pid, syscall.SIGTERM)
+		waitGone(t, pid)
 	}
-	_ = syscall.Kill(pid, syscall.SIGTERM)
-	waitGone(t, pid)
 }
 
 func waitGone(t *testing.T, pid int) {
@@ -278,7 +280,8 @@ func (f *fakeSystemd) run(_ context.Context, args ...string) error {
 	if len(args) != 2 || args[0] != "start" && args[0] != "restart" {
 		return nil
 	}
-	if pid, err := sandbox.ReadPidFile(f.root, "gate"); err == nil && alive(pid) {
+	name := strings.TrimSuffix(strings.TrimPrefix(args[1], "bugnet-"), ".service")
+	if pid, err := sandbox.ReadPidFile(f.root, name); err == nil && alive(pid) {
 		if args[0] == "start" {
 			return nil
 		}
