@@ -35,7 +35,7 @@ respawn never fails the job.
 ### Job peaks
 
 The exit frame carries the job's peak memory and whether the kernel killed it for memory:
-`{"t":"x","code":137,"o":0,"e":12,"oom":true,"pk":700}`. `pk` is the peak in MiB, rounded up.
+`{"t":"x","code":137,"o":5,"e":12,"oom":true,"pk":700}`. `pk` is the peak in MiB, rounded up.
 Both are left out when they are zero or false.
 
 Where `/sys/fs/cgroup` is a cgroup v2 mount the supervisor can write, the job runs in a cgroup
@@ -128,7 +128,8 @@ and `Server` move to `Bugnet-Cache-Control` and `Bugnet-Server` (`-` when absent
 response carries `Cache-Control: private`.
 
 `egress apply --spec FILE [--root DIR]` points the sandbox's secret hosts at the forwarder. It
-reads the spec and deletes it, even when another argument is wrong. Then, in this order:
+reads the spec and deletes it, even when the spec or an argument after `--spec` is wrong. Then,
+in this order:
 
 1. Writes `/etc/bugnet/egress.token` (0600) when the spec carries a token.
 2. Writes `/etc/bugnet/egress.json` (0644) with the endpoint, its pinned IPs, the port, the listen
@@ -192,7 +193,8 @@ with the same spec changes no file and keeps the same forwarder.
 Its paths are sandbox paths, mapped through `--root`.
 
 `ssh-up --spec FILE [--root DIR] [--new-host-key]` makes our sshd ready behind the gate's SSH
-path. It reads the spec and deletes it, even when another argument is wrong:
+path. It reads the spec and deletes it, even when the spec or an argument after `--spec` is
+wrong:
 
 ```json
 {"v": 1, "user": "boxd", "ports": [22, 2022], "sshd_path": "/usr/sbin/sshd", "install": true,
@@ -251,7 +253,7 @@ current. Under `--root`, its paths are mapped under the root.
 
 `harden --spec FILE` blocks the sandbox's outbound mail, private ranges, metadata addresses and
 mining pools. It runs as root and never under `--root`. It reads the spec and deletes it, even
-when another argument is wrong:
+when the spec or an argument after `--spec` is wrong:
 
 ```json
 {"v": 1, "mail_ports": [25, 465, 587], "deny_ranges": ["10.0.0.0/8", "fe80::/10"],
