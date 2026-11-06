@@ -133,9 +133,10 @@ with the same spec changes no file and keeps the same forwarder.
 - It sends `GET /v1/tunnel` with `Authorization: Bearer bnt_...` and the subprotocol
   `bugnet-tunnel.v1`, and after `101` copies bytes both ways in binary messages.
 - Each IP gets 5 s to connect, then 10 s for the TLS handshake and the upgrade. A proxy that
-  stalls past that is dropped and the next IP is tried, so it never holds a slot.
-- The first dial after start is retried once after 1 s. An answer from the proxy or a bad
-  certificate is not retried.
+  stalls past that is dropped and the next IP is tried, so a stalled proxy holds a slot for at
+  most 15 s per IP tried.
+- The first dial after start is retried once after 1 s, which tries every IP again. An answer
+  from the proxy or a bad certificate is not retried.
 - At most 64 connections are relayed at once. The next one waits for a slot. A connection that
   sends nothing within 10 s is closed, which frees its slot.
 - `SIGHUP` reloads the config and token for new connections. Open ones keep going. A config that
