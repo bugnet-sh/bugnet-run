@@ -41,6 +41,8 @@ const (
 	pidFile  = "pid"
 	spidFile = "spid"
 	exitFile = "exit"
+	// statsFile holds the job's peaks, written just before exitFile
+	statsFile = "stats"
 )
 
 // Job states as ls reports them

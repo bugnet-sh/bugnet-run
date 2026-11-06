@@ -31,6 +31,41 @@ shell expansion. A line whose name fails `^[A-Za-z_][A-Za-z0-9_]*$` is skipped.
 Before each job, `start` runs `respawn`: directly as root, or as `sudo -n bugnet-run respawn`
 otherwise. It calls sudo only when a service is down. A failed respawn never fails the job.
 
+### Job peaks
+
+The exit frame carries the job's peak memory and whether the kernel killed it for memory:
+`{"t":"x","code":137,"o":0,"e":12,"oom":true,"pk":700}`. `pk` is the peak in MiB, rounded up.
+Both are left out when they are zero or false.
+
+Where `/sys/fs/cgroup` is a cgroup v2 mount the supervisor can write, the job runs in a cgroup
+of its own, `/sys/fs/cgroup/bugnet/jobs/<id>`:
+
+- The supervisor makes it and writes `+memory`, `+cpu` and `+io`, one at a time, to the
+  `cgroup.subtree_control` of the root, `bugnet` and `bugnet/jobs`.
+- The command starts straight in it, through `clone3`. When the kernel refuses that, the command
+  starts again outside it.
+- At exit, `pk` comes from `memory.peak`, and `oom` is true when `memory.events` counts an
+  `oom_kill`, of the command or of any process it started.
+- The cgroup is then removed, unless a process the job started still runs in it.
+
+Otherwise, and for any file the cgroup lacks:
+
+- `pk` comes from the command's `ru_maxrss`.
+- `oom` is true when the `oom_kill` count in `/proc/vmstat` grew during the job and the job
+  failed. That count is the whole sandbox's, so a job that succeeds never reports one.
+- Without `/proc/vmstat`, exit code 137 alone sets `oom`.
+
+The supervisor writes the job's `stats` file just before its `exit` file:
+
+```json
+{"v": 1, "source": "cgroup", "peak_mib": 700, "oom": true, "oom_kills": 1, "cpu_usec": 1500,
+ "io_read_bytes": 4097, "io_write_bytes": 8194}
+```
+
+`source` is `cgroup` or `rusage`. `oom_kills` counts the job's cgroup, or the whole sandbox for
+`rusage`. The `io_*` fields come only from a cgroup. A command that never started has no `stats`
+file. Jobs that run as a user other than root cannot make cgroups, so they always take `rusage`.
+
 ## Sandbox services
 
 These run as root. `--root DIR` maps every sandbox path under `DIR`, for the `local` provider.

@@ -39,6 +39,10 @@ type Frame struct {
 	Out    int64  `json:"o,omitempty"`
 	Err    int64  `json:"e,omitempty"`
 	Reason string `json:"reason,omitempty"`
+	// OOM reports that the kernel killed a process of the job for want of memory
+	OOM bool `json:"oom,omitempty"`
+	// PeakMiB is the job's peak memory in MiB, rounded up
+	PeakMiB uint32 `json:"pk,omitempty"`
 }
 
 // Encode writes f to w as one JSON line in a single Write call

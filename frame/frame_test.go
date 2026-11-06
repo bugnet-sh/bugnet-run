@@ -29,6 +29,7 @@ func sampleFrames() []frame.Frame {
 		{Kind: frame.KindHeartbeat, Out: 15, Err: 256},
 		{Kind: frame.KindExit, Code: 3, Out: 15, Err: 256},
 		{Kind: frame.KindExit},
+		{Kind: frame.KindExit, Code: 137, Out: 1, Err: 2, OOM: true, PeakMiB: 700},
 		{Kind: frame.KindError, Reason: frame.ReasonJobExists},
 		{Kind: frame.KindError, Reason: frame.ReasonJobNotFound},
 		{Kind: frame.KindError, Reason: frame.ReasonBadArgs},
@@ -84,6 +85,17 @@ func TestEncodeDecodeRoundTrip(t *testing.T) {
 	got := decodeAll(t, bytes.NewReader(stream))
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("round trip mismatch\n got %+v\nwant %+v", got, want)
+	}
+}
+
+func TestExitFrameCarriesOOMAndPeak(t *testing.T) {
+	got := encodeAll(t, []frame.Frame{{Kind: frame.KindExit, Code: 137, OOM: true, PeakMiB: 700}})
+	if want := `{"t":"x","code":137,"oom":true,"pk":700}` + "\n"; string(got) != want {
+		t.Fatalf("encoded %s, want %s", got, want)
+	}
+	got = encodeAll(t, []frame.Frame{{Kind: frame.KindExit, Code: 3}})
+	if want := `{"t":"x","code":3}` + "\n"; string(got) != want {
+		t.Fatalf("encoded %s, want %s, without oom or pk", got, want)
 	}
 }
 

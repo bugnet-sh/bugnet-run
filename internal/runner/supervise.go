@@ -20,7 +20,7 @@ const (
 	codeNotFound  = 127
 )
 
-// supervise writes the exit file after the command, and spid so followers notice if it dies first
+// supervise writes stats and exit after the command, and spid so followers notice if it dies first
 func supervise(args []string) int {
 	spec, dir, err := parseCommand("supervise", args)
 	if err != nil {
@@ -29,23 +29,27 @@ func supervise(args []string) int {
 	if dir, err = filepath.Abs(dir); err != nil {
 		return exitFailed
 	}
-	code := []byte(strconv.Itoa(runCommand(dir, spec)) + "\n")
-	if err := writeAtomic(filepath.Join(dir, exitFile), code); err != nil {
+	code, st := runCommand(dir, spec)
+	if st != nil {
+		_ = writeStats(dir, *st)
+	}
+	exit := []byte(strconv.Itoa(code) + "\n")
+	if err := writeAtomic(filepath.Join(dir, exitFile), exit); err != nil {
 		return exitFailed
 	}
 	return exitOK
 }
 
-// runCommand returns the command's exit code, or 128 plus the signal that ended it
-func runCommand(dir string, spec commandSpec) int {
+// runCommand returns the command's exit code, or 128 plus the signal that ended it, and its peaks
+func runCommand(dir string, spec commandSpec) (int, *jobStats) {
 	outF, err := openAppend(filepath.Join(dir, outFile))
 	if err != nil {
-		return codeCannotRun
+		return codeCannotRun, nil
 	}
 	defer func() { _ = outF.Close() }()
 	errF, err := openAppend(filepath.Join(dir, errFile))
 	if err != nil {
-		return codeCannotRun
+		return codeCannotRun, nil
 	}
 	defer func() { _ = errF.Close() }()
 	if err := writePid(filepath.Join(dir, spidFile), os.Getpid()); err != nil {
@@ -53,10 +57,11 @@ func runCommand(dir string, spec commandSpec) int {
 	}
 
 	cmd, err := prepare(spec)
+	var job *measured
 	if err == nil {
 		cmd.Stdout, cmd.Stderr = outF, errF
-		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-		err = cmd.Start()
+		job = jobMeter.begin(spec.job.id)
+		cmd, err = job.start(cmd)
 	}
 	if err != nil {
 		_, _ = fmt.Fprintf(errF, "bugnet-run: %v\n", err)
@@ -64,9 +69,9 @@ func runCommand(dir string, spec commandSpec) int {
 		var lookup *exec.Error
 		if errors.As(err, &lookup) &&
 			(errors.Is(err, exec.ErrNotFound) || errors.Is(err, fs.ErrNotExist)) {
-			return codeNotFound
+			return codeNotFound, nil
 		}
-		return codeCannotRun
+		return codeCannotRun, nil
 	}
 
 	if err := writePid(filepath.Join(dir, pidFile), cmd.Process.Pid); err != nil {
@@ -75,12 +80,15 @@ func runCommand(dir string, spec commandSpec) int {
 	err = cmd.Wait()
 	if cmd.ProcessState == nil {
 		_, _ = fmt.Fprintf(errF, "bugnet-run: %v\n", err)
-		return exitFailed
+		job.drop()
+		return exitFailed, nil
 	}
+	code := cmd.ProcessState.ExitCode()
 	if ws, ok := cmd.ProcessState.Sys().(syscall.WaitStatus); ok && ws.Signaled() {
-		return 128 + int(ws.Signal())
+		code = 128 + int(ws.Signal())
 	}
-	return cmd.ProcessState.ExitCode()
+	st := job.finish(cmd.ProcessState, code)
+	return code, &st
 }
 
 // prepare applies cwd and env to the supervisor itself so PATH lookups see the command's view

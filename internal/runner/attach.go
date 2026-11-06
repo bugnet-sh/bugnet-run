@@ -159,8 +159,10 @@ func follow(
 		}
 		switch state {
 		case stateExited:
+			st := readStats(dir)
 			return frame.Encode(w, frame.Frame{
 				Kind: frame.KindExit, Code: code, Out: stdout.off, Err: stderr.off,
+				OOM: st.OOM, PeakMiB: st.PeakMiB,
 			})
 		case stateLost:
 			return errJobLost
