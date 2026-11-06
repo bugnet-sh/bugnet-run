@@ -203,7 +203,7 @@ func writeSet(b *strings.Builder, name, typ string, ps []netip.Prefix) {
 		name, typ, strings.Join(elems, ",\n\t\t\t     "))
 }
 
-// nftRules puts every accept before every drop
+// nftRules puts every accept before every reject
 func (r rules) nftRules() []string {
 	rs := []string{`oifname "lo" accept`, "ct state established,related accept"}
 	for _, a := range r.resolvers {
@@ -225,18 +225,26 @@ func (r rules) nftRules() []string {
 		for i, p := range r.mailPorts {
 			ports[i] = strconv.Itoa(p)
 		}
-		rs = append(rs, "tcp dport { "+strings.Join(ports, ", ")+" } drop")
+		rs = append(rs, "tcp dport { "+strings.Join(ports, ", ")+" } reject with tcp reset")
 	}
 	for _, p := range r.deny {
-		rs = append(rs, fmt.Sprintf("%s daddr %s drop", family(p.Addr()), nftAddr(p)))
+		rs = append(rs, nftReject(fmt.Sprintf("%s daddr %s", family(p.Addr()), nftAddr(p)))...)
 	}
 	if len(r.pools4) > 0 {
-		rs = append(rs, "ip daddr @pools4 drop")
+		rs = append(rs, nftReject("ip daddr @pools4")...)
 	}
 	if len(r.pools6) > 0 {
-		rs = append(rs, "ip6 daddr @pools6 drop")
+		rs = append(rs, nftReject("ip6 daddr @pools6")...)
 	}
 	return rs
+}
+
+// nftReject answers TCP with a reset and the rest with admin-prohibited, so no client waits
+func nftReject(match string) []string {
+	return []string{
+		match + " meta l4proto tcp reject with tcp reset",
+		match + " reject with icmpx type admin-prohibited",
+	}
 }
 
 func family(a netip.Addr) string {
@@ -295,15 +303,16 @@ func (r rules) restore(four bool) string {
 		}
 	}
 	for _, port := range r.mailPorts {
-		add(fmt.Sprintf("-p tcp -m tcp --dport %d -j DROP", port))
+		add(fmt.Sprintf("-p tcp -m tcp --dport %d -j REJECT --reject-with tcp-reset", port))
 	}
-	pools := r.pools6
+	pools, prohibited := r.pools6, "icmp6-adm-prohibited"
 	if four {
-		pools = r.pools4
+		pools, prohibited = r.pools4, "icmp-admin-prohibited"
 	}
 	for _, p := range append(slices.Clone(r.deny), pools...) {
 		if mine(p.Addr()) {
-			add("-d " + p.String() + " -j DROP")
+			add("-d " + p.String() + " -p tcp -j REJECT --reject-with tcp-reset")
+			add("-d " + p.String() + " -j REJECT --reject-with " + prohibited)
 		}
 	}
 	b.WriteString("COMMIT\n")

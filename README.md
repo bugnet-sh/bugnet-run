@@ -274,8 +274,10 @@ The rules apply to outbound traffic only. These are allowed first, in this order
   adverts and router solicitations, so the lease and IPv6 routing survive the blocks.
 - Each `allow` entry, the provider's own control addresses.
 
-Then these are dropped: TCP to each of `mail_ports` on any address, each `deny_ranges` entry, and
-each pool.
+Then these are rejected: TCP to each of `mail_ports` on any address, each `deny_ranges` entry, and
+each pool. TCP gets a reset and other traffic ICMP admin-prohibited, so a blocked connection
+fails at once as refused or unreachable. A dropped one would hang until the client gave up, about
+2 minutes for a TCP connect.
 
 1. When neither `nft` nor `iptables-restore` exists, it runs `apt-get update` and
    `apt-get install -y --no-install-recommends nftables`, within 60 s for both. This runs before

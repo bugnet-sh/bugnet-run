@@ -120,6 +120,19 @@ func reaches(addr string) string {
 	return "timeout 5 bash -c 'echo > /dev/tcp/" + addr + "/29417'"
 }
 
+// refusedFast fails unless every blocked kind of connect fails within 1 s, not at a timeout
+func refusedFast(t *testing.T, id, peer string) {
+	t.Helper()
+	// The peer is in a private range, 25 is a mail port and 198.51.100.0/24 is the spec's pool
+	for _, dest := range []string{peer + "/29417", "192.0.2.1/25", "198.51.100.7/80"} {
+		got := inContainer(t, id, "out=$(timeout 1 bash -c 'echo > /dev/tcp/"+dest+"' 2>&1); "+
+			"echo \"$? $out\"")
+		if !strings.HasPrefix(got, "1 ") || !strings.Contains(got, "Connection refused") {
+			t.Fatalf("a connect to %s gave %q, want a refusal within 1 s", dest, got)
+		}
+	}
+}
+
 func TestContainerHardenTwiceOneTable(t *testing.T) {
 	needDocker(t)
 	bin := linuxBuild(t)
@@ -140,9 +153,7 @@ func TestContainerHardenTwiceOneTable(t *testing.T) {
 			}
 			eq(t, strings.Count(inContainer(t, id, "nft list tables"), "table inet bugnet"), 1)
 			eq(t, inContainer(t, id, "stat -c '%a %U' /etc/bugnet/firewall.rules"), "644 root")
-			if !failsInContainer(id, reaches(addr)) {
-				t.Fatalf("the peer at %s in 172.16.0.0/12 is reachable after harden", addr)
-			}
+			refusedFast(t, id, addr)
 			// The resolver docker hands out sits in a private range, and must still answer
 			inContainer(t, id, "getent hosts deb.debian.org")
 
@@ -151,9 +162,7 @@ func TestContainerHardenTwiceOneTable(t *testing.T) {
 				"/run/bugnet/firewall.checked")
 			eq(t, inContainer(t, id, "bugnet-run respawn"), `{"started":["firewall"]}`)
 			eq(t, strings.Count(inContainer(t, id, "nft list tables"), "table inet bugnet"), 1)
-			if !failsInContainer(id, reaches(addr)) {
-				t.Fatal("the peer is reachable after respawn loaded the table again")
-			}
+			refusedFast(t, id, addr)
 			eq(t, inContainer(t, id, "bugnet-run respawn"), `{"started":[]}`)
 		})
 	}
@@ -170,26 +179,35 @@ func TestContainerHardenWithIptables(t *testing.T) {
 			id := hardenContainer(t, image, bin, "--cap-add", "NET_ADMIN")
 			inContainer(t, id, "apt-get update -qq >/dev/null && DEBIAN_FRONTEND=noninteractive "+
 				"apt-get install -y -qq --no-install-recommends iptables >/dev/null")
-			for range 2 {
+			// The second restore refills the chain, so it holds as many rules as after the first
+			var once []string
+			for i := range 2 {
 				out, code := containerHarden(t, id, spec)
 				eq(t, out, `{"firewall":"iptables"}`)
 				eq(t, code, 0)
+				var counts []string
+				for _, tool := range []string{"iptables", "ip6tables"} {
+					counts = append(counts, inContainer(t, id, tool+" -S BUGNET | wc -l"))
+				}
+				if i == 0 {
+					once = counts
+				}
+				eq(t, counts, once)
+			}
+			if once[0] == "1" || once[1] == "1" {
+				t.Fatalf("a BUGNET chain is empty, with %v lines", once)
 			}
 			for _, tool := range []string{"iptables", "ip6tables"} {
 				eq(t, inContainer(t, id, tool+" -S OUTPUT | grep -c -- '-j BUGNET'"), "1")
 			}
-			if !failsInContainer(id, reaches(addr)) {
-				t.Fatalf("the peer at %s is reachable after harden", addr)
-			}
+			refusedFast(t, id, addr)
 			inContainer(t, id, "getent hosts deb.debian.org")
 
 			inContainer(t, id, "iptables -D OUTPUT -j BUGNET && "+
 				"touch -d '2 minutes ago' /run/bugnet/firewall.checked")
 			eq(t, inContainer(t, id, "bugnet-run respawn"), `{"started":["firewall"]}`)
 			eq(t, inContainer(t, id, "iptables -S OUTPUT | grep -c -- '-j BUGNET'"), "1")
-			if !failsInContainer(id, reaches(addr)) {
-				t.Fatal("the peer is reachable after respawn loaded the chain again")
-			}
+			refusedFast(t, id, addr)
 		})
 	}
 }
