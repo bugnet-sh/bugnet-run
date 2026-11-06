@@ -45,7 +45,11 @@ func runTests(m *testing.M) int {
 		fmt.Fprintf(os.Stderr, "build fakesshd: %v\n%s", err, out)
 		return 1
 	}
-	return m.Run()
+	code := m.Run()
+	for _, cleanup := range cleanups {
+		cleanup()
+	}
+	return code
 }
 
 func eq[T any](t *testing.T, got, want T) {
