@@ -485,3 +485,30 @@ func TestSshUpFailsWhenSshdNeverListens(t *testing.T) {
 	eq(t, line, `{"error":"sshd_failed"}`)
 	eq(t, code, 1)
 }
+
+func TestCheckRedactsPlaceholders(t *testing.T) {
+	t.Parallel()
+	root, err := sandbox.NewRoot(t.TempDir())
+	must(t, err)
+	must(t, os.MkdirAll(root.Path(sandbox.SSHDir), 0o755))
+	d := supervised{sup: sandbox.Supervisor{Root: root}}
+	cfg := "Port 22\nListenAddress 127.0.0.1\nPidFile /run/bugnet/sshd.pid\n" +
+		"SetEnv HF_TOKEN=bnsec_" + strings.Repeat("a", 26) + "\n"
+	must(t, d.Check(context.Background(), fakeSSHDPath, []byte(cfg)))
+
+	err = d.Check(context.Background(), fakeSSHDPath, []byte(cfg+"Refuse yes\n"))
+	if err == nil {
+		t.Fatal("a refused config passed the check")
+	}
+	eq(t, strings.Contains(err.Error(), "HF_TOKEN=bnsec_"), true)
+	eq(t, strings.Contains(err.Error(), "aaaa"), false)
+	entries, err := os.ReadDir(root.Path(sandbox.SSHDir))
+	must(t, err)
+	eq(t, len(entries), 0)
+}
+
+func TestRedact(t *testing.T) {
+	t.Parallel()
+	eq(t, string(redact([]byte("A=bnsec_abcz234567 B=bnsec_ C=bnsec_x9 bnsec"))),
+		"A=bnsec_ B=bnsec_ C=bnsec_9 bnsec")
+}

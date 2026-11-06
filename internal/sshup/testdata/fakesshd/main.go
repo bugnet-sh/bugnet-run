@@ -36,7 +36,7 @@ func main() {
 	}
 	if test {
 		if cfg["refuse"] != "" {
-			die("refused")
+			die("refused SetEnv " + cfg["setenv"])
 		}
 		return
 	}

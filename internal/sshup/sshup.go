@@ -14,7 +14,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -588,9 +587,6 @@ type supervised struct {
 
 func (s supervised) Running() bool { return s.sup.Running(sandbox.SSHD) }
 
-// placeholders matches what secrets.env holds, so sshd's complaints never carry one to a log
-var placeholders = regexp.MustCompile(`bnsec_[a-z2-7]+`)
-
 func (s supervised) Check(ctx context.Context, sshdPath string, config []byte) error {
 	tmp, err := os.CreateTemp(s.sup.Root.Path(sandbox.SSHDir), ".sshd_config.check-*")
 	if err != nil {
@@ -608,10 +604,23 @@ func (s supervised) Check(ctx context.Context, sshdPath string, config []byte) e
 	defer cancel()
 	out, err := exec.CommandContext(ctx, sshdPath, "-t", "-f", tmp.Name()).CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("sshd -t refused the config: %w: %s", err,
-			placeholders.ReplaceAll(tail(out), []byte("bnsec_")))
+		return fmt.Errorf("sshd -t refused the config: %w: %s", err, redact(tail(out)))
 	}
 	return nil
+}
+
+// redact drops each placeholder's body, so sshd quoting our SetEnv line never logs one
+func redact(b []byte) []byte {
+	const prefix = "bnsec_"
+	var out []byte
+	for {
+		i := bytes.Index(b, []byte(prefix))
+		if i < 0 {
+			return append(out, b...)
+		}
+		out = append(out, b[:i+len(prefix)]...)
+		b = bytes.TrimLeft(b[i+len(prefix):], "abcdefghijklmnopqrstuvwxyz234567")
+	}
 }
 
 func (s supervised) Start(ctx context.Context) error { return s.sup.Start(ctx, sandbox.SSHD) }
