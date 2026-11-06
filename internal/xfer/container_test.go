@@ -86,13 +86,14 @@ func TestContainerTransferHelpersAsRoot(t *testing.T) {
 			upload := "/home/bx/.bugnet/xfer/t2/conf"
 			inContainer(t, id, "su -s /bin/sh bx -c 'mkdir -p /home/bx/.bugnet/xfer/t2 && "+
 				"printf new > "+upload+"'")
-			must(t, json.Unmarshal([]byte(helper(id, "place", "--from", upload, "--to",
-				"/mnt/etc/app/conf", "--mode", "0640")), &got))
+			must(t, json.Unmarshal([]byte(inContainer(t, id, "umask 077 && bugnet-run place "+
+				"--from "+upload+" --to /mnt/etc/app/conf --mode 0640")), &got))
 			eq(t, got.Size, int64(3))
 			eq(t, got.Mode, uint32(0o640))
-			// A new file keeps the staged file's owner, as sudo mv would
+			// A new file and its new parents keep the staged file's owner, as sudo mv would
 			eq(t, inContainer(t, id, "stat -c '%U %G %a' /mnt/etc/app/conf"), "bx bx 640")
-			eq(t, inContainer(t, id, "stat -c '%a' /mnt/etc /mnt/etc/app"), "755\n755")
+			eq(t, inContainer(t, id, "stat -c '%U %G %a' /mnt/etc /mnt/etc/app"),
+				"bx bx 755\nbx bx 755")
 			eq(t, inContainer(t, id, "test -e "+upload+" && echo left || echo gone"), "gone")
 			eq(t, inContainer(t, id, "ls -A /mnt/etc/app"), "conf")
 

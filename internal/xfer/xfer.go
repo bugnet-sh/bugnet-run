@@ -197,7 +197,7 @@ func stageOut(args []string) (Info, error) {
 	}
 	afterOpen(f)
 
-	if err := mkdirOwned(filepath.Dir(dst), uid, gid); err != nil {
+	if err := mkdirOwned(filepath.Dir(dst), uid, gid, 0o700); err != nil {
 		return Info{}, fail(ErrStageFailed, err)
 	}
 	// The copy keeps the source's time, so the router compares it with the ETag it pinned
@@ -246,8 +246,8 @@ func lookupOwner(name string) (int, int, error) {
 	return uid, gid, nil
 }
 
-// mkdirOwned creates the missing directories of dir for the owner alone, leaving existing ones
-func mkdirOwned(dir string, uid, gid int) error {
+// mkdirOwned creates the missing directories of dir with perm for uid, leaving existing ones
+func mkdirOwned(dir string, uid, gid int, perm fs.FileMode) error {
 	fi, err := os.Stat(dir)
 	if err == nil {
 		if !fi.IsDir() {
@@ -258,13 +258,23 @@ func mkdirOwned(dir string, uid, gid int) error {
 	if !errors.Is(err, fs.ErrNotExist) {
 		return err
 	}
-	if err := mkdirOwned(filepath.Dir(dir), uid, gid); err != nil {
+	if err := mkdirOwned(filepath.Dir(dir), uid, gid, perm); err != nil {
 		return err
 	}
-	if err := os.Mkdir(dir, 0o700); err != nil && !errors.Is(err, fs.ErrExist) {
+	if err := os.Mkdir(dir, perm); err != nil && !errors.Is(err, fs.ErrExist) {
 		return err
 	}
-	return os.Lchown(dir, uid, gid)
+	// Owner and mode go through a descriptor, so a link swapped in meanwhile is never followed
+	d, err := os.OpenFile(dir, os.O_RDONLY|syscall.O_DIRECTORY|syscall.O_NOFOLLOW, 0)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = d.Close() }()
+	if err := d.Chown(uid, gid); err != nil {
+		return err
+	}
+	// Mkdir's mode went through the umask, so it is set again
+	return d.Chmod(perm)
 }
 
 /* place */
@@ -328,7 +338,8 @@ func place(args []string) (Info, error) {
 		return Info{}, fail(ErrPlaceFailed, err)
 	}
 
-	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+	// New parents get the new file's owner, so that owner can work in them without sudo
+	if err := mkdirOwned(filepath.Dir(dst), uid, gid, 0o755); err != nil {
 		return Info{}, fail(ErrPlaceFailed, err)
 	}
 	// The staged file gets its final owner and mode first, so the target never shows the user's

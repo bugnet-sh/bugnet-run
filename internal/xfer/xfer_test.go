@@ -313,6 +313,29 @@ func TestPlaceNeverFollowsASwappedSource(t *testing.T) {
 	eq(t, fi.Mode().Perm(), fs.FileMode(0o644))
 }
 
+func TestPlaceParentsGetTheNewFilesOwnerAndMode(t *testing.T) {
+	// Not parallel, since the umask belongs to the whole process
+	old := syscall.Umask(0o077)
+	t.Cleanup(func() { syscall.Umask(old) })
+	dir := t.TempDir()
+	staged := filepath.Join(dir, "home", ".bugnet", "xfer", "t3", "f")
+	writeFile(t, staged, "one", 0o600)
+	uid, gid := owner(t, staged)
+	must(t, os.Mkdir(filepath.Join(dir, "out"), 0o700))
+	target := filepath.Join(dir, "out", "new", "deeper", "f")
+	info(t, Place, "--from", staged, "--to", target)
+	for _, d := range []string{"out/new", "out/new/deeper"} {
+		fi, err := os.Lstat(filepath.Join(dir, d))
+		must(t, err)
+		eq(t, fi.Mode().Perm(), fs.FileMode(0o755))
+		u, g := owner(t, filepath.Join(dir, d))
+		eq(t, [2]int{u, g}, [2]int{uid, gid})
+	}
+	fi, err := os.Stat(filepath.Join(dir, "out"))
+	must(t, err)
+	eq(t, fi.Mode().Perm(), fs.FileMode(0o700))
+}
+
 func TestPlaceCreatesParentsAndReplaces(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()

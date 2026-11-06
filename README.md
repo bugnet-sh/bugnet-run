@@ -257,7 +257,7 @@ trailing slash never makes a final symlink count.
 
 `place --from S --to P [--mode 0644]` moves a staged upload over `P`:
 
-- It creates the missing parents of `P` (0755).
+- It creates the missing parents of `P`, 0755 whatever the umask, with the new file's owner.
 - It opens `S` once without following a symlink, and sets the owner and mode through that open
   file, so a path swapped meanwhile is never changed.
 - The file gets `--mode` and keeps the owner of the file it replaces. A new file keeps the owner
