@@ -269,10 +269,10 @@ func TestSshUpReportsTheKeySshdServes(t *testing.T) {
 	eq(t, f.sshd.take(), []string{"hup", "wait 22", "wait 22"})
 
 	// A run killed between the key's rename and its SIGHUP leaves the reload owed
-	f.sshd.lostSignal = true
+	f.sshd.killed = true
 	line, _ = f.up(t, f.spec(), "--new-host-key")
 	eq(t, line, `{"error":"sshd_failed"}`)
-	f.sshd.lostSignal = false
+	f.sshd.killed = false
 	owed := f.sshUp(t, f.spec())
 	eq(t, owed.HostKey != fresh.HostKey, true)
 	eq(t, f.sshd.served(), owed.HostKey)
@@ -316,6 +316,17 @@ func TestSshUpRecordsSshdPathLast(t *testing.T) {
 	f.sshUp(t, s)
 	eq(t, f.sshd.take(), []string{"restart", "wait 22"})
 	eq(t, f.read(t, sandbox.SSHDPathFile), s.SSHDPath+"\n")
+
+	// A run killed between writing sshd_path and the restart leaves the restart owed
+	f.sshd.killed = true
+	line, _ = f.up(t, f.spec())
+	eq(t, line, `{"error":"sshd_failed"}`)
+	eq(t, f.read(t, sandbox.SSHDPathFile), f.sshdPath+"\n")
+	f.sshd.killed = false
+	f.sshUp(t, f.spec())
+	eq(t, f.sshd.take(), []string{"restart", "restart", "wait 22"})
+	f.sshUp(t, f.spec())
+	eq(t, f.sshd.take(), []string{"wait 22"})
 }
 
 func TestSshUpSignalsWhatAKilledRunWrote(t *testing.T) {

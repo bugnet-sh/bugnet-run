@@ -130,8 +130,8 @@ type fakeDaemon struct {
 	loaded   time.Time
 	refuse   bool
 	failWait bool
-	// lostSignal makes a SIGHUP reach nothing, as when ssh-up is killed just before sending it
-	lostSignal bool
+	// killed makes a SIGHUP or restart do nothing, as when ssh-up is killed just before it
+	killed bool
 }
 
 func (d *fakeDaemon) Running() bool {
@@ -165,6 +165,9 @@ func (d *fakeDaemon) Restart(context.Context) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	d.calls = append(d.calls, "restart")
+	if d.killed {
+		return errors.New("killed before the restart")
+	}
 	d.running = true
 	d.serving, d.loaded = keyLine(d.keyFile), time.Now()
 	return nil
@@ -174,7 +177,7 @@ func (d *fakeDaemon) Reload() error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	d.calls = append(d.calls, "hup")
-	if d.lostSignal {
+	if d.killed {
 		return errors.New("killed before the signal")
 	}
 	d.serving, d.loaded = keyLine(d.keyFile), time.Now()
