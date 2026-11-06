@@ -400,6 +400,13 @@ func TestSetupStartsTheSampler(t *testing.T) {
 	eq(t, code, 0)
 	eq(t, f.samplerPid(t), pid)
 
+	// A later spec without sample leaves the running sampler and its config alone
+	s.Sample = false
+	_, code = f.run(t, s)
+	eq(t, code, 0)
+	eq(t, f.samplerPid(t), pid)
+	eq(t, readFile(t, f.root.Path(sandbox.SampleConfig)), "{\"v\":1}\n")
+
 	// A repair touches only the gate
 	_, code = f.run(t, nil, "--repair")
 	eq(t, code, 0)
