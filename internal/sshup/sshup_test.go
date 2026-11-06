@@ -347,21 +347,17 @@ func TestSshUpSignalsWhatAKilledRunWrote(t *testing.T) {
 		must(t, os.WriteFile(path, spec, 0o600))
 		return run(context.Background(), []string{"--spec", path, "--root", root.Dir()}, tune)
 	}
-	shortWait := func(u *upper) { u.sshd = supervised{sup: u.sup, wait: 2 * time.Second} }
-	res, err := up(from, shortWait)
+	res, err := up(from, nil)
 	must(t, err)
 	eq(t, res.Port, from)
 
 	// The killed run wrote the config and port file for the new port but sent no SIGHUP
-	_, err = up(to, func(u *upper) {
-		shortWait(u)
-		u.sshd = unsignalled{u.sshd}
-	})
+	_, err = up(to, func(u *upper) { u.sshd = unsignalled{u.sshd} })
 	eq(t, err != nil, true)
 	eq(t, strings.TrimSpace(readRoot(t, root, sandbox.SSHPortFile)), strconv.Itoa(to))
 	eq(t, acceptsAt(net.JoinHostPort("127.0.0.1", strconv.Itoa(from))), true)
 
-	res, err = up(to, shortWait)
+	res, err = up(to, nil)
 	must(t, err)
 	eq(t, res.Port, to)
 	eq(t, acceptsAt(net.JoinHostPort("127.0.0.1", strconv.Itoa(to))), true)
@@ -556,18 +552,18 @@ func TestSshUpInstallTimeoutCoversBothCommands(t *testing.T) {
 	t.Parallel()
 	apt := fakeApt(t)
 	// Each command alone fits the timeout
-	for _, sleeps := range [][2]string{{"1.2", "0"}, {"0", "1.2"}} {
+	for _, sleeps := range [][2]string{{"1.8", "0"}, {"0", "1.8"}} {
 		apt.sleep(t, sleeps[0], sleeps[1])
-		must(t, runInstall(context.Background(), apt.path, 2*time.Second))
+		must(t, runInstall(context.Background(), apt.path, 3*time.Second))
 	}
 
 	f := newFixture(t)
 	f.system = true
 	must(t, os.Remove(f.sshdPath))
-	apt.sleep(t, "1.2", "1.2")
+	apt.sleep(t, "1.8", "1.8")
 	f.apt = apt.path
 	s := f.spec()
-	s.Install, s.InstallTimeoutS = true, 2
+	s.Install, s.InstallTimeoutS = true, 3
 	line, code := f.up(t, s)
 	eq(t, line, `{"error":"install_failed"}`)
 	eq(t, code, 1)

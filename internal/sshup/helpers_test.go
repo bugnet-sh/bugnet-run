@@ -46,6 +46,8 @@ func runTests(m *testing.M) int {
 		fmt.Fprintf(os.Stderr, "build fakesshd: %v\n%s", err, out)
 		return 1
 	}
+	// One run pays macOS's check of a new binary, which can take seconds, before a test times it
+	_ = exec.Command(fakeSSHDPath, "-t").Run()
 	code := m.Run()
 	for _, cleanup := range cleanups {
 		cleanup()
