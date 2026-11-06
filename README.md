@@ -148,7 +148,9 @@ in this order:
    bytes, since musl reads 512 at a time. There is never a `::1` line.
 6. Writes `/etc/bugnet/secrets.env` (0644) and `/etc/profile.d/bugnet.sh`. When our
    `sshd_config` exists, its one `SetEnv` line is rewritten, and our sshd gets `SIGHUP` if it
-   changed.
+   changed. It then keeps the sandbox lock for up to 10 s, until sshd writes its pid file again,
+   so an `ssh-up` waiting for the lock never finds sshd in the middle of a reload. An sshd that
+   exits instead is left for `respawn`.
 7. Writes the presets. With `git_placeholder`, `/etc/bugnet/git-credentials` (0644) holds the
    lines `username=x-access-token` and `password=<placeholder>`. A block in `/etc/gitconfig` sets
    `credential.https://github.com.helper` to
@@ -166,7 +168,7 @@ of these and exits 1:
 | `bad_spec` | The spec is missing, malformed or fails a check |
 | `port_443_taken` | Another process holds the listen address |
 | `token_missing` | The spec has no token and `/etc/bugnet/egress.token` holds none |
-| `apply_failed` | A file could not be written, or the forwarder did not listen within 5 s |
+| `apply_failed` | A write failed, the forwarder did not listen in 5 s, or sshd hung in a reload |
 
 The spec holds placeholders only. An `env` value, `git_placeholder` or `npm_placeholder` that is
 not `bnsec_` and 26 base32 characters is `bad_spec`. Hosts must be lower-case names. A second run

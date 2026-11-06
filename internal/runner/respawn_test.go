@@ -338,6 +338,96 @@ func TestRespawnBringsBackSshdAfterRunWiped(t *testing.T) {
 	}
 }
 
+// An apply that HUPs sshd lets go of the sandbox only once sshd wrote its pid file again
+func TestApplyThenSshUpLeavesOneSshd(t *testing.T) {
+	t.Parallel()
+	fake := buildFakeSSHD(t)
+	s := newRoot(t, "sshd", "forward")
+	root := s.root
+	env := root.Path(sandbox.EnvFile)
+	if err := os.MkdirAll(filepath.Dir(env), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(env, []byte("SSL_CERT_FILE=/etc/ssl/ca.crt\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	port := ln.Addr().(*net.TCPAddr).Port
+	_ = ln.Close()
+	p := strconv.Itoa(port)
+	sshUp := func() {
+		t.Helper()
+		spec := fmt.Sprintf(`{"v":1,"user":"boxd","ports":[%d],"sshd_path":%q,"authorize":[]}`,
+			port, fake)
+		path := filepath.Join(t.TempDir(), "ssh-spec.json")
+		if err := os.WriteFile(path, []byte(spec), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		out := runRaw(t, "ssh-up", "--spec", path, "--root", root.Dir())
+		eq(t, strings.HasPrefix(string(out), `{"port":`+p+`,`), true)
+	}
+	log := func() string {
+		b, _ := os.ReadFile(filepath.Join(root.Path(sandbox.SSHDir), "fake-sshd.log"))
+		return string(b)
+	}
+	sshUp()
+	pid, err := sandbox.ReadPidFile(root, "sshd")
+	if err != nil {
+		t.Fatal(err)
+	}
+	eq(t, log(), "start "+p+"\n")
+
+	token := "bnt_" + base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{6}, 32))
+	apply := `{"v":1,"token":"` + token + `","endpoint":"egress.example","ips":["127.0.0.1"],` +
+		`"port":9,"listen":"127.0.0.1:0","hosts":["huggingface.co"],"env":[{"name":"HF_TOKEN",` +
+		`"value":"bnsec_` + strings.Repeat("a", 26) + `"}],"home":""}`
+	path := filepath.Join(t.TempDir(), "egress-spec.json")
+	if err := os.WriteFile(path, []byte(apply), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	eq(t, strings.TrimSpace(string(runRaw(t, "egress", "apply", "--spec", path, "--root",
+		root.Dir()))), `{"forward":"listening","hosts":1,"secrets":1}`)
+	sshUp()
+
+	// A reload ssh-up wrongly found owed would show within the fake's delay
+	time.Sleep(600 * time.Millisecond)
+	eq(t, log(), "start "+p+"\nhup "+p+"\n")
+	again, err := sandbox.ReadPidFile(root, "sshd")
+	eq(t, err, nil)
+	eq(t, again, pid)
+	sameAs(t, sshdsOf(t, root), []int{pid})
+	b, err := os.ReadFile(root.Path(sandbox.SSHPortFile))
+	eq(t, err, nil)
+	eq(t, strings.TrimSpace(string(b)), p)
+	eq(t, dials(net.JoinHostPort("127.0.0.1", p)), true)
+}
+
+// sshdsOf lists the processes whose command line names root's sshd_config
+func sshdsOf(t *testing.T, root sandbox.Root) []int {
+	t.Helper()
+	out, err := exec.Command("ps", "-A", "-o", "pid=", "-o", "command=").Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	mark := " -f " + root.Path(sandbox.SSHDConfig)
+	var pids []int
+	for line := range strings.Lines(string(out)) {
+		fields := strings.Fields(line)
+		if len(fields) < 2 || !strings.HasSuffix(strings.TrimSpace(line), mark) {
+			continue
+		}
+		pid, err := strconv.Atoi(fields[0])
+		if err != nil {
+			t.Fatal(err)
+		}
+		pids = append(pids, pid)
+	}
+	return pids
+}
+
 func dials(addr string) bool {
 	c, err := net.DialTimeout("tcp", addr, time.Second)
 	if err != nil {

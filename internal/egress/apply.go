@@ -51,7 +51,9 @@ const (
 )
 
 const (
-	listenWait   = 5 * time.Second
+	listenWait = 5 * time.Second
+	// sshdWait is as long as ssh-up waits for sshd to listen again
+	sshdWait     = 10 * time.Second
 	probeTimeout = 500 * time.Millisecond
 	maxEnv       = 64
 	// musl reads /etc/hosts in 512-byte lines, so longer ones lose their last names
@@ -146,7 +148,7 @@ func run(ctx context.Context, args []string) (result, error) {
 	}
 	sup := sandbox.Supervisor{Root: root, Systemctl: systemctl}
 	fwd := supervised{sup: sup, exe: exe, wait: listenWait}
-	a := applier{root: root, sup: sup, fwd: fwd, trace: func(string) {}}
+	a := applier{root: root, sup: sup, fwd: fwd, sshdWait: sshdWait, trace: func(string) {}}
 	return a.apply(ctx, spec)
 }
 
@@ -247,10 +249,12 @@ type forwarder interface {
 }
 
 type applier struct {
-	root  sandbox.Root
-	sup   sandbox.Supervisor
-	fwd   forwarder
-	trace func(step string)
+	root sandbox.Root
+	sup  sandbox.Supervisor
+	fwd  forwarder
+	// sshdWait bounds the wait for our sshd to write its pid file again after a SIGHUP
+	sshdWait time.Duration
+	trace    func(step string)
 }
 
 // apply takes DP 6.5's steps in order, so nothing points at the forwarder before it listens
@@ -310,7 +314,7 @@ func (a applier) apply(ctx context.Context, s Spec) (result, error) {
 		}
 	}
 	a.trace("hosts")
-	if err := a.writeEnv(s); err != nil {
+	if err := a.writeEnv(ctx, s); err != nil {
 		return result{}, classify(err)
 	}
 	a.trace("env")
@@ -372,7 +376,7 @@ func hostsBlock(ip string, hosts []string) string {
 }
 
 // writeEnv sends our sshd SIGHUP only when its SetEnv line changed, so new sessions see it
-func (a applier) writeEnv(s Spec) error {
+func (a applier) writeEnv(ctx context.Context, s Spec) error {
 	vars := make([]sandbox.Var, len(s.Env))
 	for i, v := range s.Env {
 		vars[i] = sandbox.Var{Name: v.Name, Value: v.Value}
@@ -388,8 +392,44 @@ func (a applier) writeEnv(s Spec) error {
 	if err != nil || !changed {
 		return err
 	}
-	_, err = a.sup.Signal(sandbox.SSHD, syscall.SIGHUP)
-	return err
+	return a.reloadSSHD(ctx)
+}
+
+// reloadSSHD holds the sandbox lock until sshd wrote its pid file again, as ssh-up's wait does
+func (a applier) reloadSSHD(ctx context.Context) error {
+	pidFile := a.root.Path(sandbox.PidFile(sandbox.SSHD.Name))
+	since := modTime(pidFile)
+	pid, _ := sandbox.ReadPidFile(a.root, sandbox.SSHD.Name)
+	sent, err := a.sup.Signal(sandbox.SSHD, syscall.SIGHUP)
+	if err != nil || !sent {
+		return err
+	}
+	deadline := time.Now().Add(a.sshdWait)
+	for {
+		if a.sup.Running(sandbox.SSHD) && !modTime(pidFile).Equal(since) {
+			return nil
+		}
+		// An sshd that died on its new config is respawn's to bring back, never mid-reload
+		if errors.Is(syscall.Kill(pid, 0), syscall.ESRCH) {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("sshd did not write its pid file again within %v", a.sshdWait)
+		}
+		select {
+		case <-time.After(25 * time.Millisecond):
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+}
+
+func modTime(path string) time.Time {
+	info, err := os.Stat(path)
+	if err != nil {
+		return time.Time{}
+	}
+	return info.ModTime()
 }
 
 func (a applier) writePresets(s Spec) error {

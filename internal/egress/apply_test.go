@@ -234,19 +234,57 @@ func TestApplyRewritesSetEnvAndHUPsSshd(t *testing.T) {
 	writeFile(t, root.Path(sandbox.EnvFile), "SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt\n")
 	writeFile(t, root.Path(sandbox.SSHDConfig),
 		"Port 22\nSetEnv OLD=1\nUsePAM no\nSetEnv DUP=2\n")
-	sshd := fakeSSHD(t, root)
+	sshd := fakeSSHD(t, root, "")
 	applyFake(t, root, spec("huggingface.co"))
 	eq(t, readFile(t, root.Path(sandbox.SSHDConfig)), "Port 22\nSetEnv "+
 		"SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt HF_TOKEN="+hfPlaceholder+"\nUsePAM no\n")
-	eq(t, hungUp(t, sshd), true)
+	eq(t, sshd.hungUp(t), true)
 
-	sshd = fakeSSHD(t, root)
+	sshd = fakeSSHD(t, root, "")
 	applyFake(t, root, spec("huggingface.co"))
-	eq(t, hungUp(t, sshd), false)
+	eq(t, sshd.hungUp(t), false)
 
 	plain := testRoot(t)
 	applyFake(t, plain, spec("huggingface.co"))
 	eq(t, exists(plain.Path(sandbox.SSHDConfig)), false)
+}
+
+// A queued ssh-up takes the lock only once sshd wrote its pid file again
+func TestApplyHoldsTheLockUntilSshdReloads(t *testing.T) {
+	t.Parallel()
+	root := testRoot(t)
+	writeFile(t, root.Path(sandbox.SSHDConfig), "Port 22\n")
+	pidFile := root.Path(sandbox.PidFile("sshd"))
+	sshd := fakeSSHD(t, root, `rm -f "$2"; sleep 0.3; echo $$ > "$2"`)
+	before, err := os.Stat(pidFile)
+	must(t, err)
+	time.Sleep(20 * time.Millisecond)
+	began := time.Now()
+	applyFake(t, root, spec("huggingface.co"))
+	if took := time.Since(began); took < 250*time.Millisecond {
+		t.Errorf("apply returned after %v, before sshd wrote its pid file again", took)
+	}
+	after, err := os.Stat(pidFile)
+	must(t, err)
+	eq(t, after.ModTime().After(before.ModTime()), true)
+	pid, err := sandbox.ReadPidFile(root, "sshd")
+	must(t, err)
+	eq(t, pid, sshd.cmd.Process.Pid)
+	eq(t, sandbox.Supervisor{Root: root}.Running(sandbox.SSHD), true)
+}
+
+func TestApplyFailsWhenSshdNeverReloads(t *testing.T) {
+	t.Parallel()
+	root := testRoot(t)
+	writeFile(t, root.Path(sandbox.SSHDConfig), "Port 22\n")
+	sshd := fakeSSHD(t, root, ":")
+	a := applier{
+		root: root, sup: sandbox.Supervisor{Root: root}, fwd: newFakeForwarder(t, root),
+		sshdWait: 300 * time.Millisecond, trace: func(string) {},
+	}
+	_, err := a.apply(context.Background(), spec("huggingface.co"))
+	eq(t, reasonOf(err), ErrApplyFailed)
+	eq(t, sshd.hungUp(t), false)
 }
 
 func TestApplyWritesSecretsEnvAndProfile(t *testing.T) {
@@ -565,7 +603,7 @@ func applyWith(t *testing.T, root sandbox.Root, fwd forwarder, s Spec) (string, 
 	t.Helper()
 	var events []string
 	a := applier{
-		root: root, sup: sandbox.Supervisor{Root: root}, fwd: fwd,
+		root: root, sup: sandbox.Supervisor{Root: root}, fwd: fwd, sshdWait: 5 * time.Second,
 		trace: func(step string) { events = append(events, step) },
 	}
 	res, err := a.apply(context.Background(), s)
@@ -637,29 +675,46 @@ func gitCredential(t *testing.T, root sandbox.Root, action, input string) string
 	return string(out)
 }
 
-// fakeSSHD starts a process named sshd and records it in our sshd's pid file
-func fakeSSHD(t *testing.T, root sandbox.Root) *exec.Cmd {
-	t.Helper()
-	cmd := exec.Command("bash", "-c", "exec -a sshd sleep 30")
-	must(t, cmd.Start())
-	t.Cleanup(func() { _ = cmd.Process.Kill() })
-	must(t, sandbox.WritePidFile(root, "sshd", cmd.Process.Pid))
-	return cmd
+type fakeDaemon struct {
+	cmd  *exec.Cmd
+	done chan struct{}
 }
 
-// hungUp reports whether cmd ended by SIGHUP within a second, killing it otherwise
-func hungUp(t *testing.T, cmd *exec.Cmd) bool {
+// fakeSSHD starts a process named sshd whose arguments name our config, as sshd's do
+func fakeSSHD(t *testing.T, root sandbox.Root, onHUP string) *fakeDaemon {
 	t.Helper()
-	done := make(chan struct{})
-	go func() { _ = cmd.Wait(); close(done) }()
+	// An empty onHUP leaves SIGHUP's default, which ends the process
+	trap := ""
+	if onHUP != "" {
+		trap = "trap '" + onHUP + "' HUP; "
+	}
+	script := trap + `echo $$ > "$2"; while :; do sleep 0.05; done`
+	must(t, os.MkdirAll(root.Path(sandbox.RunDir), 0o755))
+	cmd := exec.Command("bash", "-c", `exec -a sshd bash -c "$0" -f "$@"`, script,
+		root.Path(sandbox.SSHDConfig), root.Path(sandbox.PidFile("sshd")))
+	must(t, cmd.Start())
+	d := &fakeDaemon{cmd: cmd, done: make(chan struct{})}
+	// Reaped at once, so its pid is gone the moment it dies, as for a real sshd
+	go func() { _ = cmd.Wait(); close(d.done) }()
+	t.Cleanup(func() { _ = cmd.Process.Kill(); <-d.done })
+	waitFor(t, 5*time.Second, func() bool {
+		pid, err := sandbox.ReadPidFile(root, "sshd")
+		return err == nil && pid == cmd.Process.Pid
+	})
+	return d
+}
+
+// hungUp reports whether the fake ended by SIGHUP within a second, killing it otherwise
+func (d *fakeDaemon) hungUp(t *testing.T) bool {
+	t.Helper()
 	select {
-	case <-done:
+	case <-d.done:
 	case <-time.After(time.Second):
-		_ = cmd.Process.Kill()
-		<-done
+		_ = d.cmd.Process.Kill()
+		<-d.done
 		return false
 	}
-	ws, ok := cmd.ProcessState.Sys().(syscall.WaitStatus)
+	ws, ok := d.cmd.ProcessState.Sys().(syscall.WaitStatus)
 	return ok && ws.Signaled() && ws.Signal() == syscall.SIGHUP
 }
 
