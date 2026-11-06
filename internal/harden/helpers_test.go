@@ -112,18 +112,24 @@ func buildIptables(t *testing.T, opts []option, more ...option) (string, string)
 	return ruleset(t, opts, more...).iptables()
 }
 
-func index(s, sub string) int {
+// index fails the test alone when sub is missing, so the other parallel tests run on
+func index(t *testing.T, s, sub string) int {
+	t.Helper()
 	i := strings.Index(s, sub)
 	if i < 0 {
-		panic(fmt.Sprintf("%q not in the ruleset", sub))
+		t.Fatalf("%q not in the ruleset", sub)
 	}
 	return i
 }
 
-func firstIndex(s, sub string) int { return index(s, sub) }
+func firstIndex(t *testing.T, s, sub string) int {
+	t.Helper()
+	return index(t, s, sub)
+}
 
-func lastIndex(s, sub string) int {
-	index(s, sub)
+func lastIndex(t *testing.T, s, sub string) int {
+	t.Helper()
+	index(t, s, sub)
 	return strings.LastIndex(s, sub)
 }
 

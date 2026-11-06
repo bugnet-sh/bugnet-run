@@ -25,10 +25,10 @@ func TestRulesetAllowsBeforeBlocks(t *testing.T) {
 		}),
 	}
 	rs := buildNft(t, spec(), more...)
-	eq(t, lastIndex(rs, "accept") < firstIndex(rs, "reject"), true)
+	eq(t, lastIndex(t, rs, "accept") < firstIndex(t, rs, "reject"), true)
 	v4, v6 := buildIptables(t, spec(), more...)
 	for _, rs := range []string{v4, v6} {
-		eq(t, lastIndex(rs, "-j ACCEPT") < firstIndex(rs, "-j REJECT"), true)
+		eq(t, lastIndex(t, rs, "-j ACCEPT") < firstIndex(t, rs, "-j REJECT"), true)
 	}
 }
 
@@ -53,8 +53,8 @@ func TestBlocksRejectAndNeverDrop(t *testing.T) {
 		"ip daddr 10.0.0.0/8", "ip6 daddr fe80::/10", "ip6 daddr fd00:ec2::254",
 		"ip daddr @pools4", "ip6 daddr @pools6",
 	} {
-		eq(t, index(rs, match+" meta l4proto tcp reject with tcp reset\n") <
-			index(rs, match+" reject with icmpx type admin-prohibited\n"), true)
+		eq(t, index(t, rs, match+" meta l4proto tcp reject with tcp reset\n") <
+			index(t, rs, match+" reject with icmpx type admin-prohibited\n"), true)
 	}
 	for _, c := range []struct{ text, dest, prohibited string }{
 		{v4, "10.0.0.0/8", "icmp-admin-prohibited"},
@@ -62,13 +62,13 @@ func TestBlocksRejectAndNeverDrop(t *testing.T) {
 		{v6, "fe80::/10", "icmp6-adm-prohibited"},
 		{v6, "2001:db8:bad::/48", "icmp6-adm-prohibited"},
 	} {
-		eq(t, index(c.text, "-A BUGNET -d "+c.dest+" -p tcp -j REJECT --reject-with tcp-reset\n") <
-			index(c.text, "-A BUGNET -d "+c.dest+" -j REJECT --reject-with "+c.prohibited+"\n"),
-			true)
+		reset := "-A BUGNET -d " + c.dest + " -p tcp -j REJECT --reject-with tcp-reset\n"
+		other := "-A BUGNET -d " + c.dest + " -j REJECT --reject-with " + c.prohibited + "\n"
+		eq(t, index(t, c.text, reset) < index(t, c.text, other), true)
 	}
 	for _, port := range []string{"25", "465", "587"} {
 		for _, text := range []string{v4, v6} {
-			index(text, "-A BUGNET -p tcp -m tcp --dport "+port+
+			index(t, text, "-A BUGNET -p tcp -m tcp --dport "+port+
 				" -j REJECT --reject-with tcp-reset\n")
 		}
 	}
@@ -77,11 +77,11 @@ func TestBlocksRejectAndNeverDrop(t *testing.T) {
 func TestResolverInPrivateRangeStaysReachable(t *testing.T) {
 	t.Parallel()
 	rs := buildNft(t, spec(), resolvConf("nameserver 10.0.0.2\n"))
-	eq(t, index(rs, "ip daddr 10.0.0.2 udp dport 53 accept") < index(rs, "10.0.0.0/8"), true)
-	eq(t, index(rs, "ip daddr 10.0.0.2 tcp dport 53 accept") < index(rs, "10.0.0.0/8"), true)
+	eq(t, index(t, rs, "ip daddr 10.0.0.2 udp dport 53 accept") < index(t, rs, "10.0.0.0/8"), true)
+	eq(t, index(t, rs, "ip daddr 10.0.0.2 tcp dport 53 accept") < index(t, rs, "10.0.0.0/8"), true)
 	v4, _ := buildIptables(t, spec(), resolvConf("nameserver 10.0.0.2\n"))
-	eq(t, index(v4, "-A BUGNET -d 10.0.0.2/32 -p udp -m udp --dport 53 -j ACCEPT") <
-		index(v4, "-A BUGNET -d 10.0.0.0/8 -p tcp -j REJECT"), true)
+	eq(t, index(t, v4, "-A BUGNET -d 10.0.0.2/32 -p udp -m udp --dport 53 -j ACCEPT") <
+		index(t, v4, "-A BUGNET -d 10.0.0.0/8 -p tcp -j REJECT"), true)
 }
 
 func TestResolversFromBothFiles(t *testing.T) {
@@ -119,11 +119,11 @@ func TestDefaultGatewaysStayReachable(t *testing.T) {
 	t.Parallel()
 	rs := buildNft(t, spec(), procFile("net/route", routeTable),
 		procFile("net/ipv6_route", ipv6RouteTable))
-	eq(t, index(rs, "ip daddr 10.0.0.1 accept") < index(rs, "10.0.0.0/8"), true)
-	eq(t, index(rs, "ip6 daddr fe80::1 accept") < index(rs, "fe80::/10"), true)
+	eq(t, index(t, rs, "ip daddr 10.0.0.1 accept") < index(t, rs, "10.0.0.0/8"), true)
+	eq(t, index(t, rs, "ip6 daddr fe80::1 accept") < index(t, rs, "fe80::/10"), true)
 	_, v6 := buildIptables(t, spec(), procFile("net/ipv6_route", ipv6RouteTable))
-	eq(t, index(v6, "-A BUGNET -d fe80::1/128 -j ACCEPT") <
-		index(v6, "-A BUGNET -d fe80::/10 -p tcp -j REJECT"), true)
+	eq(t, index(t, v6, "-A BUGNET -d fe80::1/128 -j ACCEPT") <
+		index(t, v6, "-A BUGNET -d fe80::/10 -p tcp -j REJECT"), true)
 }
 
 func TestNeighbourDiscoveryAndDHCPStayOpen(t *testing.T) {
@@ -133,7 +133,7 @@ func TestNeighbourDiscoveryAndDHCPStayOpen(t *testing.T) {
 		"icmpv6 type { nd-neighbor-solicit, nd-neighbor-advert, nd-router-solicit } accept",
 		"udp sport 68 udp dport 67 accept", "udp sport 546 udp dport 547 accept",
 	} {
-		eq(t, index(rs, rule) < index(rs, "reject"), true)
+		eq(t, index(t, rs, rule) < index(t, rs, "reject"), true)
 	}
 }
 
@@ -145,18 +145,18 @@ func TestEveryBlockOfTheSpec(t *testing.T) {
 		"ip daddr 169.254.0.0/16 ", "ip6 daddr fc00::/7 ", "ip6 daddr fe80::/10 ",
 		"ip6 daddr fd00:ec2::254 ", "ip daddr @pools4 ",
 	} {
-		index(rs, rule)
+		index(t, rs, rule)
 	}
 	eq(t, strings.Contains(rs, "pools6"), false)
 	eq(t, strings.HasPrefix(rs, "# bugnet-run harden nft\ntable inet bugnet\n"+
 		"delete table inet bugnet\ntable inet bugnet {\n"), true)
-	index(rs, "type filter hook output priority 0; policy accept;")
+	index(t, rs, "type filter hook output priority 0; policy accept;")
 
 	// E2B's spec blocks only mail and pools inside, its ranges go outside the VM
 	rs = buildNft(t, spec(withSpec(func(s *Spec) { s.DenyRanges, s.Pools = nil, nil })))
 	eq(t, strings.Contains(rs, "daddr 10.0.0.0/8"), false)
 	eq(t, strings.Contains(rs, "@pools"), false)
-	index(rs, "tcp dport { 25, 465, 587 } reject with tcp reset")
+	index(t, rs, "tcp dport { 25, 465, 587 } reject with tcp reset")
 }
 
 func TestPoolsCapped(t *testing.T) {
@@ -174,7 +174,7 @@ func TestPoolsMergedAndSplitByFamily(t *testing.T) {
 	eq(t, strings.Contains(rs, "elements = { 192.0.2.0/24,\n\t\t\t     198.51.100.0/24 }"), true)
 	eq(t, strings.Contains(rs, "type ipv6_addr\n\t\tflags interval\n"+
 		"\t\telements = { 2001:db8::/32 }"), true)
-	index(rs, "ip6 daddr @pools6 meta l4proto tcp reject with tcp reset")
+	index(t, rs, "ip6 daddr @pools6 meta l4proto tcp reject with tcp reset")
 }
 
 func TestBadSpec(t *testing.T) {
