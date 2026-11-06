@@ -308,6 +308,8 @@ and then:
 - At the first reading, every 5 s and at `SIGTERM`, it writes `/tmp/bugnet/stats.json` (0644)
   through a temporary file renamed over it. It never makes `/tmp/bugnet`, which the exec user
   owns, and skips the write while that is missing.
+- At each write, it exits instead when its config is gone, as when a local sandbox's directory
+  is deleted. Otherwise it runs until `SIGTERM`.
 
 ```json
 {"v": 1, "mem_peak_mib": 700, "swap_peak_mib": 0, "disk_peak_mib": 400, "cpu_seconds": 4,

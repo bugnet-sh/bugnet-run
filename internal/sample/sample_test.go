@@ -381,6 +381,43 @@ func TestSampleServeCarriesTheEarlierPeaks(t *testing.T) {
 	eq(t, <-done, 0)
 }
 
+func TestSampleStopsWithoutItsConfig(t *testing.T) {
+	t.Parallel()
+	for name, remove := range map[string]func(root string) error{
+		"config": func(root string) error {
+			return os.Remove(filepath.Join(root, "etc", "bugnet", "sample.json"))
+		},
+		// A local destroy removes the whole root, again when a write raced the first pass
+		"root": func(root string) error {
+			err := os.RemoveAll(root)
+			for i := 0; err != nil && i < 50; i++ {
+				time.Sleep(10 * time.Millisecond)
+				err = os.RemoveAll(root)
+			}
+			return err
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			root, done, _ := served(t, "")
+			pidFile := filepath.Join(root, "run", "bugnet", "sample.pid")
+			waitFor(t, "serve wrote no stats", func() bool {
+				_, err := os.Stat(filepath.Join(root, "tmp", "bugnet", "stats.json"))
+				return err == nil
+			})
+			must(t, remove(root))
+			select {
+			case code := <-done:
+				eq(t, code, 0)
+			case <-time.After(5 * time.Second):
+				t.Fatal("the sampler kept running without its config")
+			}
+			_, err := os.Stat(pidFile)
+			eq(t, errors.Is(err, os.ErrNotExist), true)
+		})
+	}
+}
+
 func TestConfigIsStrict(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()

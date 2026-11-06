@@ -10,6 +10,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"io/fs"
 	"maps"
 	"os"
 	"os/exec"
@@ -67,7 +68,9 @@ type pace struct{ read, write, gpu time.Duration }
 type sampler struct {
 	procDir string
 	out     string
-	paths   func() []string
+	// config is the sampler's config file, whose removal stops the sampler
+	config string
+	paths  func() []string
 	// usage gives the device and used bytes of a path's filesystem, false for one in memory
 	usage func(path string) (dev, used uint64, ok bool)
 	gpu   func(ctx context.Context) (usedMiB uint64, ok bool)
@@ -96,7 +99,7 @@ func newSampler(procDir, out string) *sampler {
 	}
 }
 
-// Run is bugnet-run sample, which runs until SIGTERM
+// Run is bugnet-run sample, which runs until SIGTERM or until its config is gone
 func Run(args []string, stderr io.Writer) int {
 	signal.Ignore(syscall.SIGHUP)
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, os.Interrupt)
@@ -131,6 +134,7 @@ func serve(ctx context.Context, args []string, stderr io.Writer, procDir string,
 	defer sandbox.RemovePidFile(root, sandbox.Sample.Name, pid)
 	s := newSampler(procDir, root.Path(StatsFile))
 	s.paths = diskPaths(root.Dir())
+	s.config = *configPath
 	s.resume()
 	s.run(ctx, p)
 	return 0
@@ -194,6 +198,10 @@ func (s *sampler) run(ctx context.Context, p pace) {
 		}
 		s.read(now)
 		if wrote.IsZero() || now.Sub(wrote) >= p.write {
+			// A sampler without its config never writes into a directory being deleted
+			if s.orphaned() {
+				return
+			}
 			_ = s.write()
 			wrote = now
 		}
@@ -204,6 +212,15 @@ func (s *sampler) run(ctx context.Context, p pace) {
 		case <-tick.C:
 		}
 	}
+}
+
+// orphaned reports that the config is gone, as when a local sandbox's directory is deleted
+func (s *sampler) orphaned() bool {
+	if s.config == "" {
+		return false
+	}
+	_, err := os.Stat(s.config)
+	return errors.Is(err, fs.ErrNotExist)
 }
 
 // resume carries on from an earlier sampler's stats file, so a respawn keeps every peak

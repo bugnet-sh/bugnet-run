@@ -103,6 +103,12 @@ func TestContainerSampleReadsTheSandbox(t *testing.T) {
 			eq(t, again.CPUSeconds >= st.CPUSeconds, true)
 			eq(t, again.MemPeakMiB >= st.MemPeakMiB, true)
 			eq(t, again.BusyP95Millicores >= 900, true)
+
+			// Without its config the sampler stops by itself at its next write
+			inContainer(t, id, "rm /etc/bugnet/sample.json")
+			newPid := inContainer(t, id, "cat /run/bugnet/sample.pid")
+			inContainer(t, id, "for i in $(seq 100); do kill -0 "+newPid+
+				" 2>/dev/null || exit 0; sleep 0.1; done; exit 1")
 		})
 	}
 }
