@@ -55,7 +55,13 @@ func TestLockSerialisesAndTryLockSkips(t *testing.T) {
 	unlock()
 	<-got
 
+	// A child that another test forks holds a copy of the lock until its exec, so retry briefly
+	deadline := time.Now().Add(time.Second)
 	free, ok, err := TryLock(r)
+	for err == nil && !ok && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+		free, ok, err = TryLock(r)
+	}
 	must(t, err)
 	eq(t, ok, true)
 	free()
