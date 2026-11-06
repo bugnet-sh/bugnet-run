@@ -143,16 +143,16 @@ func TestContainerSuperviseFallsBackWithoutWritableCgroups(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 			id := runnerContainer(t, "debian:12", bin, flags...)
-			x, stats := exitOf(t, id, "big", "exec "+hundredMiB)
+			x, stats := exitOf(t, id, "big", "cat /proc/self/cgroup > /tmp/cg; exec "+hundredMiB)
 			eq(t, x.Code, 0)
 			if x.PeakMiB < 100 || x.PeakMiB > 400 {
 				t.Fatalf("peak %d MiB for a 100 MiB buffer", x.PeakMiB)
 			}
-			want := "rusage"
+			// A cgroup without the memory controller has no memory.peak, so ru_maxrss gives it
 			if flags != nil {
-				want = "cgroup"
+				eq(t, inContainer(t, id, "cat /tmp/cg"), "0::/bugnet/jobs/big")
 			}
-			eq(t, stats["source"], any(want))
+			eq(t, stats["source"], any("rusage"))
 		})
 	}
 }

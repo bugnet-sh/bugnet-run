@@ -65,9 +65,12 @@ The supervisor writes the job's `stats` file just before its `exit` file:
  "io_read_bytes": 4097, "io_write_bytes": 8194}
 ```
 
-`source` is `cgroup` or `rusage`. `oom_kills` counts the job's cgroup, or the whole sandbox for
-`rusage`. The `io_*` fields come only from a cgroup. A command that never started has no `stats`
-file. Jobs that run as a user other than root cannot make cgroups, so they always take `rusage`.
+`source` names where `peak_mib` came from. It is `cgroup` for the cgroup's `memory.peak`, and
+`rusage` for `ru_maxrss`, the peak of the largest single process. A cgroup without the memory
+controller, or on a kernel before 5.19, has no `memory.peak`, so its job reports `rusage`.
+`oom_kills` counts the job's cgroup where it has `memory.events`, else the whole sandbox. The
+`io_*` fields come only from a cgroup. A command that never started has no `stats` file. Jobs
+that run as a user other than root cannot make cgroups, so they always take `rusage`.
 
 ## Sandbox services
 

@@ -107,10 +107,33 @@ func TestCgroupWithoutMemoryFilesFallsBack(t *testing.T) {
 	j := m.begin("job")
 	writeTestFile(t, filepath.Join(m.procDir, "vmstat"), "pgfault 9\noom_kill 4\n")
 	st := j.finish(ran(t, j, exec.Command("true")), 137)
-	equal(t, st.Source, sourceCgroup)
+	// source names where the peak came from, so a per-process peak never passes for a tree's
+	equal(t, st.Source, sourceRusage)
 	equal(t, st.OOM, true)
 	equal(t, st.OOMKills, uint64(1))
 	equal(t, st.PeakMiB > 0, true)
+}
+
+// A kernel before 5.19 has memory.events without memory.peak
+func TestCgroupEventsWithoutPeak(t *testing.T) {
+	t.Parallel()
+	m := fixtureMeter(t, true)
+	writeTestFile(t, filepath.Join(m.procDir, "vmstat"), "oom_kill 0\n")
+	j := m.begin("job")
+	writeTestFile(t, filepath.Join(j.dir, "memory.events"), "oom 1\noom_kill 1\n")
+	writeTestFile(t, filepath.Join(j.dir, "cpu.stat"), "usage_usec 1500\n")
+	st := j.finish(ran(t, j, exec.Command("true")), 0)
+	equal(t, st.Source, sourceRusage)
+	equal(t, st.PeakMiB > 0, true)
+	equal(t, st.OOM, true)
+	equal(t, st.OOMKills, uint64(1))
+	equal(t, st.CPUUsec, uint64(1500))
+
+	j = m.begin("peak")
+	writeTestFile(t, filepath.Join(j.dir, "memory.peak"), "1048576\n")
+	st = j.finish(ran(t, j, exec.Command("true")), 0)
+	equal(t, st.Source, sourceCgroup)
+	equal(t, st.PeakMiB, uint32(1))
 }
 
 func TestSuperviseFallbackRusage(t *testing.T) {

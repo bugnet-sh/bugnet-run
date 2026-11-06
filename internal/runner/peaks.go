@@ -27,7 +27,7 @@ const codeSIGKILL = 128 + int(syscall.SIGKILL)
 // jobStats is a job's stats file, written before its exit file
 type jobStats struct {
 	V int `json:"v"`
-	// Source is cgroup for a job started in a cgroup of its own, else rusage
+	// Source names where PeakMiB came from, cgroup for the job cgroup's memory.peak, else rusage
 	Source  string `json:"source"`
 	PeakMiB uint32 `json:"peak_mib"`
 	OOM     bool   `json:"oom"`
@@ -161,9 +161,8 @@ func (j *measured) finish(ps *os.ProcessState, code int) jobStats {
 	st.CPUUsec = uint64(max(ps.UserTime()+ps.SystemTime(), 0).Microseconds())
 	counted := false
 	if j.dir != "" {
-		st.Source = sourceCgroup
 		if peak, ok := readUint(filepath.Join(j.dir, "memory.peak")); ok {
-			st.PeakMiB = ceilMiB(peak)
+			st.Source, st.PeakMiB = sourceCgroup, ceilMiB(peak)
 		}
 		if kills, ok := keyed(filepath.Join(j.dir, "memory.events"), "oom_kill"); ok {
 			st.OOMKills, st.OOM, counted = kills, kills > 0, true
