@@ -223,6 +223,72 @@ func TestHardenFallsBackToIptables(t *testing.T) {
 	})
 }
 
+func TestNftFailureFallsBackToIptables(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t, procFile("net/if_inet6", "x"))
+	f.fakes = newFakeTools("nft", "iptables")
+	f.h.tools = f.fakes.tools()
+	f.fakes.answer = func(c call) (string, error) {
+		if c.name == "nft" {
+			return "Error: Could not process rule: No such file or directory",
+				errors.New("exit status 1")
+		}
+		return "", nil
+	}
+	eq(t, f.run(t), `{"firewall":"iptables"}`)
+	eq(t, names(f.fakes.take()), []string{
+		"nft -f FILE", "iptables-restore --noflush", "iptables -w -C OUTPUT -j BUGNET",
+		"ip6tables-restore --noflush", "ip6tables -w -C OUTPUT -j BUGNET",
+	})
+	b, err := os.ReadFile(f.h.root.Path(RulesFile))
+	must(t, err)
+	eq(t, strings.HasPrefix(string(b), "# bugnet-run harden iptables\n"), true)
+	entries, err := os.ReadDir(f.h.root.Path(sandbox.EtcDir))
+	must(t, err)
+	eq(t, len(entries), 1)
+}
+
+func TestRefusedLoadKeepsTheEarlierRuleset(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t)
+	eq(t, f.run(t), `{"firewall":"nft"}`)
+	f.fakes.take()
+	path := f.h.root.Path(RulesFile)
+	before, err := os.ReadFile(path)
+	must(t, err)
+
+	// One more pool changes the text, so a refused ruleset that took the old one's place shows
+	f.spec.Pools = append(f.spec.Pools, "203.0.113.0/24")
+	f.fakes.answer = func(call) (string, error) {
+		return "Error: Could not process rule: Operation not permitted", errors.New("exit status 1")
+	}
+	eq(t, f.run(t), `{"error":"firewall_unavailable"}`)
+	calls := f.fakes.take()
+	eq(t, names(calls), []string{"nft -f FILE"})
+	eq(t, calls[0].stdin != string(before), true)
+	after, err := os.ReadFile(path)
+	must(t, err)
+	eq(t, string(after), string(before))
+	entries, err := os.ReadDir(f.h.root.Path(sandbox.EtcDir))
+	must(t, err)
+	eq(t, len(entries), 1)
+	eq(t, entries[0].Name(), "firewall.rules")
+
+	// The kept ruleset still brings a lost table back
+	f.fakes.answer = func(c call) (string, error) {
+		if c.args[0] == "list" {
+			return "table ip filter\n", nil
+		}
+		return "", nil
+	}
+	reloaded, err := f.h.recheck(t.Context(), time.Now().Add(time.Hour))
+	must(t, err)
+	eq(t, reloaded, true)
+	calls = f.fakes.take()
+	eq(t, names(calls), []string{"nft list tables", "nft -f FILE"})
+	eq(t, calls[1].stdin, string(before))
+}
+
 func TestIptablesWithoutIPv6SkipsIt(t *testing.T) {
 	t.Parallel()
 	f := newFixture(t)
@@ -286,6 +352,8 @@ func TestRecheckReloadsAMissingTable(t *testing.T) {
 	// harden itself counts as a check
 	eq(t, Due(f.h.root, time.Now()), false)
 	eq(t, Due(f.h.root, time.Now().Add(time.Minute)), true)
+	// A clock stepped back makes the last check look like the future, which never waits
+	eq(t, Due(f.h.root, time.Now().Add(-time.Hour)), true)
 
 	f.fakes.answer = func(c call) (string, error) {
 		if c.args[0] == "list" {
