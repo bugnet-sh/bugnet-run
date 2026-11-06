@@ -352,6 +352,11 @@ at most 4 KiB, fails the strict decoding of version 1, or holds a number above 2
 exists and its process is gone. Before it starts any, it copies the runner as `setup` does. It
 prints `{"started":["gate"]}`.
 
+A pid file counts only while its process is alive and, where `/proc` exists, its command line
+holds the service's word (`gate`, `forward`, `sample` or `sshd`) and the service's config path
+under this root, standing alone. So a pid reused by another process, or once held by another
+local root's service, never counts.
+
 It also puts the firewall back. When `/etc/bugnet/firewall.rules` exists and the last check is a
 minute old or more, it checks that the table is loaded: `nft list tables` shows `table inet
 bugnet`, or `iptables -w -C OUTPUT -j BUGNET` and its IPv6 twin pass. When the table is gone it

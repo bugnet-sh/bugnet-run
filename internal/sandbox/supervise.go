@@ -124,10 +124,18 @@ func (s Supervisor) Init() Init {
 	return InitSetsid
 }
 
-// Running reports whether the process the service's pid file names is alive and is that service
+// Running reports whether the service's pid file names a live process that is it, for this root
 func (s Supervisor) Running(svc Service) bool {
 	pid, err := ReadPidFile(s.Root, svc.Name)
-	return err == nil && alive(pid, svc.marker)
+	return err == nil && alive(pid, svc.marker, s.config(svc))
+}
+
+// config is the service's config path under this root, which its command line holds
+func (s Supervisor) config(svc Service) string {
+	if svc.Config == "" {
+		return ""
+	}
+	return s.Root.Path(svc.Config)
 }
 
 // Dead lists the services whose config exists and whose process is gone
@@ -185,7 +193,7 @@ func (s Supervisor) Signal(svc Service, sig syscall.Signal) (bool, error) {
 	if err != nil {
 		return false, nil
 	}
-	return signal(pid, svc.marker, sig)
+	return signal(pid, svc.marker, s.config(svc), sig)
 }
 
 // SignalPidFile sends sig to the process a pid file names while its command line holds marker
@@ -198,11 +206,11 @@ func SignalPidFile(path, marker string, sig syscall.Signal) (bool, error) {
 	if err != nil {
 		return false, nil
 	}
-	return signal(pid, marker, sig)
+	return signal(pid, marker, "", sig)
 }
 
-func signal(pid int, marker string, sig syscall.Signal) (bool, error) {
-	if !alive(pid, marker) {
+func signal(pid int, marker, config string, sig syscall.Signal) (bool, error) {
+	if !alive(pid, marker, config) {
 		return false, nil
 	}
 	if err := syscall.Kill(pid, sig); err != nil {
@@ -217,27 +225,28 @@ func signal(pid int, marker string, sig syscall.Signal) (bool, error) {
 // Stop ends the process the service's pid file names, with SIGKILL after a grace period
 func (s Supervisor) Stop(svc Service) error {
 	pid, err := ReadPidFile(s.Root, svc.Name)
-	if err != nil || !alive(pid, svc.marker) {
+	config := s.config(svc)
+	if err != nil || !alive(pid, svc.marker, config) {
 		return nil
 	}
 	if err := syscall.Kill(pid, syscall.SIGTERM); err != nil && !errors.Is(err, syscall.ESRCH) {
 		return err
 	}
-	if waitDead(pid, svc.marker, stopGrace) {
+	if waitDead(pid, svc.marker, config, stopGrace) {
 		return nil
 	}
 	if err := syscall.Kill(pid, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
 		return err
 	}
-	if !waitDead(pid, svc.marker, time.Second) {
+	if !waitDead(pid, svc.marker, config, time.Second) {
 		return fmt.Errorf("%s pid %d survived SIGKILL", svc.Name, pid)
 	}
 	return nil
 }
 
-func waitDead(pid int, marker string, d time.Duration) bool {
+func waitDead(pid int, marker, config string, d time.Duration) bool {
 	deadline := time.Now().Add(d)
-	for alive(pid, marker) {
+	for alive(pid, marker, config) {
 		if time.Now().After(deadline) {
 			return false
 		}
@@ -427,13 +436,33 @@ func parsePid(b []byte) (int, error) {
 var procDir = "/proc"
 
 // alive trusts kill alone where /proc is missing or hides the process, as for another user's
-func alive(pid int, marker string) bool {
+func alive(pid int, marker, config string) bool {
 	if err := syscall.Kill(pid, 0); err != nil && !errors.Is(err, syscall.EPERM) {
 		return false
 	}
-	cmdline, err := os.ReadFile(filepath.Join(procDir, strconv.Itoa(pid), "cmdline"))
+	b, err := os.ReadFile(filepath.Join(procDir, strconv.Itoa(pid), "cmdline"))
 	if err != nil {
 		return true
 	}
-	return strings.Contains("\x00"+string(cmdline), marker)
+	cmdline := "\x00" + string(b)
+	return strings.Contains(cmdline, marker) && (config == "" || namesWord(cmdline, config))
 }
+
+// namesWord reports whether word stands alone in a command line, between NULs or spaces
+func namesWord(cmdline, word string) bool {
+	for i := 0; ; {
+		j := strings.Index(cmdline[i:], word)
+		if j < 0 {
+			return false
+		}
+		start, end := i+j, i+j+len(word)
+		if start > 0 && separates(cmdline[start-1]) &&
+			(end == len(cmdline) || separates(cmdline[end])) {
+			return true
+		}
+		i = start + 1
+	}
+}
+
+// separates is true for the NUL between arguments and the space sshd's process title uses
+func separates(c byte) bool { return c == 0 || c == ' ' }

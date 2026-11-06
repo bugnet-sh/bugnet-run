@@ -124,13 +124,14 @@ func TestAliveChecksTheCommandLine(t *testing.T) {
 	pid := live.Process.Pid
 	cmdline := filepath.Join(procDir, strconv.Itoa(pid), "cmdline")
 
-	eq(t, alive(pid, Gate.marker), true)
-	writeFile(t, cmdline, "/tmp/bugnet/bin/bugnet-run\x00gate\x00--config\x00/etc/gate.json\x00")
-	eq(t, alive(pid, Gate.marker), true)
-	eq(t, alive(pid, Forward.marker), false)
+	eq(t, alive(pid, Gate.marker, ""), true)
+	writeFile(t, cmdline, "/usr/local/lib/bugnet/bugnet-run\x00gate\x00--config\x00"+
+		"/etc/bugnet/gate.json\x00")
+	eq(t, alive(pid, Gate.marker, ""), true)
+	eq(t, alive(pid, Forward.marker, ""), false)
 	writeFile(t, cmdline, "/usr/sbin/sshd\x00-D\x00-e\x00-f\x00/etc/bugnet/ssh/sshd_config\x00")
-	eq(t, alive(pid, SSHD.marker), true)
-	eq(t, alive(pid, Gate.marker), false)
+	eq(t, alive(pid, SSHD.marker, ""), true)
+	eq(t, alive(pid, Gate.marker, ""), false)
 
 	r := testRoot(t)
 	writeFile(t, r.Path(GateConfig), "{}")
@@ -139,6 +140,56 @@ func TestAliveChecksTheCommandLine(t *testing.T) {
 		writeFile(t, cmdline, other)
 		eq(t, names(Supervisor{Root: r}.Dead()), []string{"gate"})
 	}
+}
+
+// A pid another local root's service once held never counts as this root's service
+func TestAliveChecksTheRoot(t *testing.T) {
+	procDir = t.TempDir()
+	t.Cleanup(func() { procDir = "/proc" })
+	live := exec.Command("sleep", "30")
+	must(t, live.Start())
+	t.Cleanup(func() { _ = live.Process.Kill(); _ = live.Wait() })
+	pid := live.Process.Pid
+	cmdline := filepath.Join(procDir, strconv.Itoa(pid), "cmdline")
+
+	mine, other := testRoot(t), testRoot(t)
+	nested, err := NewRoot(mine.Dir() + "2")
+	must(t, err)
+	gateOf := func(r Root) string {
+		return strings.Join(append(Gate.argv(r), ""), "\x00")
+	}
+	for _, r := range []Root{mine, other, nested} {
+		must(t, WritePidFile(r, "gate", pid))
+	}
+	running := func(r Root) bool {
+		if r.IsSystem() {
+			return alive(pid, Gate.marker, r.Path(Gate.Config))
+		}
+		return Supervisor{Root: r}.Running(Gate)
+	}
+
+	writeFile(t, cmdline, gateOf(mine))
+	eq(t, []bool{running(mine), running(other), running(nested), running(System)},
+		[]bool{true, false, false, false})
+	writeFile(t, cmdline, gateOf(other))
+	eq(t, []bool{running(mine), running(other)}, []bool{false, true})
+	writeFile(t, cmdline, gateOf(System))
+	eq(t, []bool{running(mine), running(System)}, []bool{false, true})
+
+	// sshd's listener rewrites its command line as one string joined by spaces
+	writeFile(t, mine.Path(SSHDConfig), "Port 22\n")
+	must(t, WritePidFile(mine, "sshd", pid))
+	must(t, WritePidFile(other, "sshd", pid))
+	writeFile(t, cmdline, "sshd: /usr/sbin/sshd -D -e -f "+mine.Path(SSHDConfig)+
+		" [listener] 0 of 10-100 startups\x00")
+	eq(t, Supervisor{Root: mine}.Running(SSHD), true)
+	eq(t, Supervisor{Root: other}.Running(SSHD), false)
+	sent, err := Supervisor{Root: other}.Signal(SSHD, syscall.SIGHUP)
+	must(t, err)
+	eq(t, sent, false)
+	eq(t, names(Supervisor{Root: other}.Dead()), []string(nil))
+	writeFile(t, other.Path(SSHDConfig), "Port 22\n")
+	eq(t, names(Supervisor{Root: other}.Dead()), []string{"sshd"})
 }
 
 func TestDeadListsConfiguredServicesWithoutProcess(t *testing.T) {
