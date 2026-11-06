@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -411,6 +413,50 @@ func TestSetupStartsTheSampler(t *testing.T) {
 	_, code = f.run(t, nil, "--repair")
 	eq(t, code, 0)
 	eq(t, f.samplerPid(t), pid)
+}
+
+// A respawn right after setup finds no pid file yet and starts a second sampler, which must yield
+func TestSetupThenRespawnRunsOneSampler(t *testing.T) {
+	f := newFixture(t)
+	t.Cleanup(func() {
+		for _, pid := range f.samplers(t) {
+			_ = syscall.Kill(pid, syscall.SIGTERM)
+			waitGone(t, pid)
+		}
+	})
+	s := f.spec()
+	s.Sample = true
+	_, code := f.run(t, s)
+	eq(t, code, 0)
+	must(t, sandbox.Supervisor{Root: f.root, Exe: binPath}.Start(t.Context(), sandbox.Sample))
+	pid := f.samplerPid(t)
+	deadline := time.Now().Add(3 * time.Second)
+	for running := f.samplers(t); len(running) != 1; running = f.samplers(t) {
+		if time.Now().After(deadline) {
+			t.Fatalf("samplers %v run, want only %d", running, pid)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	eq(t, f.samplers(t), []int{pid})
+}
+
+// samplers lists the sampler processes of this fixture's root, which only this test starts
+func (f *fixture) samplers(t *testing.T) []int {
+	t.Helper()
+	out, err := exec.Command("ps", "-A", "-o", "pid=", "-o", "command=").Output()
+	must(t, err)
+	mark := " sample --config " + f.root.Path(sandbox.SampleConfig) + " "
+	var pids []int
+	for line := range strings.Lines(string(out)) {
+		fields := strings.Fields(line)
+		if len(fields) < 2 || !strings.Contains(line+" ", mark) {
+			continue
+		}
+		pid, err := strconv.Atoi(fields[0])
+		must(t, err)
+		pids = append(pids, pid)
+	}
+	return pids
 }
 
 func TestSetupWithoutSampleStartsNone(t *testing.T) {

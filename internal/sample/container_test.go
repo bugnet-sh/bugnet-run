@@ -104,9 +104,15 @@ func TestContainerSampleReadsTheSandbox(t *testing.T) {
 			eq(t, again.MemPeakMiB >= st.MemPeakMiB, true)
 			eq(t, again.BusyP95Millicores >= 900, true)
 
+			// A second sampler finds the lock held and leaves at once, the first untouched
+			newPid := inContainer(t, id, "cat /run/bugnet/sample.pid")
+			eq(t, inContainer(t, id, "timeout 5 bugnet-run sample; echo $?"), "0")
+			eq(t, inContainer(t, id, "cat /run/bugnet/sample.pid"), newPid)
+			eq(t, inContainer(t, id, "stat -c '%a %U' /run/bugnet/sample.lock"), "600 root")
+			inContainer(t, id, "kill -0 "+newPid)
+
 			// Without its config the sampler stops by itself at its next write
 			inContainer(t, id, "rm /etc/bugnet/sample.json")
-			newPid := inContainer(t, id, "cat /run/bugnet/sample.pid")
 			inContainer(t, id, "for i in $(seq 100); do kill -0 "+newPid+
 				" 2>/dev/null || exit 0; sleep 0.1; done; exit 1")
 		})

@@ -127,6 +127,15 @@ func serve(ctx context.Context, args []string, stderr io.Writer, procDir string,
 	if err := loadConfig(*configPath); err != nil {
 		return fatal(stderr, err)
 	}
+	// A sampler setup and respawn both started, before either wrote its pid file, runs once
+	release, ok, err := sandbox.ClaimService(root, sandbox.Sample.Name)
+	if err != nil {
+		return fatal(stderr, err)
+	}
+	if !ok {
+		return 0
+	}
+	defer release()
 	pid := os.Getpid()
 	if err := sandbox.WritePidFile(root, sandbox.Sample.Name, pid); err != nil {
 		return fatal(stderr, err)

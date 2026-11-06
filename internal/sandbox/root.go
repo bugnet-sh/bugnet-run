@@ -105,6 +105,11 @@ func lock(r Root, how int) (func(), bool, error) {
 	if err != nil {
 		return nil, false, err
 	}
+	return lockFile(f, how)
+}
+
+// lockFile locks f until the returned func closes it, and closes it at once when another holds it
+func lockFile(f *os.File, how int) (func(), bool, error) {
 	if err := syscall.Flock(int(f.Fd()), how); err != nil {
 		_ = f.Close()
 		if errors.Is(err, syscall.EWOULDBLOCK) {

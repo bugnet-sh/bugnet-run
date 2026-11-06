@@ -381,6 +381,33 @@ func TestSampleServeCarriesTheEarlierPeaks(t *testing.T) {
 	eq(t, <-done, 0)
 }
 
+// Setup and respawn can both start a sampler before the first writes its pid file
+func TestSampleExitsWhileAnotherRuns(t *testing.T) {
+	t.Parallel()
+	root, first, stop := served(t, "")
+	pidFile := filepath.Join(root, "run", "bugnet", "sample.pid")
+	waitFor(t, "the first sampler wrote no pid file", func() bool {
+		_, err := os.Stat(pidFile)
+		return err == nil
+	})
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	var errOut bytes.Buffer
+	p := pace{read: 10 * time.Millisecond, write: 30 * time.Millisecond, gpu: time.Hour}
+	eq(t, serve(ctx, []string{"--root", root}, &errOut, t.TempDir(), p), 0)
+	eq(t, ctx.Err(), nil)
+	eq(t, errOut.String(), "")
+	_, err := os.Stat(pidFile)
+	must(t, err)
+	select {
+	case <-first:
+		t.Fatal("the first sampler stopped")
+	default:
+	}
+	stop()
+	eq(t, <-first, 0)
+}
+
 func TestSampleStopsWithoutItsConfig(t *testing.T) {
 	t.Parallel()
 	for name, remove := range map[string]func(root string) error{

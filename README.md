@@ -304,8 +304,10 @@ one of these and exits 1:
 | `firewall_unavailable` | No tool could be installed, or the kernel or container refused it |
 
 `sample [--config /etc/bugnet/sample.json] [--root DIR]` records the whole sandbox's peaks for the
-router's estimator. Its config is `{"v":1}`, read strictly. It writes `/run/bugnet/sample.pid`,
-and then:
+router's estimator. Its config is `{"v":1}`, read strictly. It locks `/run/bugnet/sample.lock`
+(0600), and exits 0 at once while another sampler holds that lock. So a sampler that setup and a
+respawn both started, before the first wrote its pid file, runs once. It writes
+`/run/bugnet/sample.pid`, and then:
 
 - Every second it reads `/proc/meminfo`, the `oom_kill` count in `/proc/vmstat` and the `cpu`
   lines of `/proc/stat`, and it runs `statfs` on `/`, `/tmp`, `/root` and each directory in

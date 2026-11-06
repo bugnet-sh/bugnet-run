@@ -295,3 +295,36 @@ func TestSignalPidFileChecksTheCommandLine(t *testing.T) {
 	ws, ok := live.ProcessState.Sys().(syscall.WaitStatus)
 	eq(t, ok && ws.Signaled() && ws.Signal() == syscall.SIGTERM, true)
 }
+
+func TestClaimServiceLetsOneProcessHoldIt(t *testing.T) {
+	t.Parallel()
+	r := testRoot(t)
+	release, ok, err := ClaimService(r, "sample")
+	must(t, err)
+	eq(t, ok, true)
+	info, err := os.Stat(r.Path(RunDir + "/sample.lock"))
+	must(t, err)
+	eq(t, info.Mode().Perm(), os.FileMode(0o600))
+
+	// A lock belongs to an open file, so a second open here stands for a second process
+	_, ok, err = ClaimService(r, "sample")
+	must(t, err)
+	eq(t, ok, false)
+	gate, ok, err := ClaimService(r, "gate")
+	must(t, err)
+	eq(t, ok, true)
+	gate()
+
+	release()
+	release, ok, err = ClaimService(r, "sample")
+	must(t, err)
+	eq(t, ok, true)
+	release()
+
+	target := filepath.Join(t.TempDir(), "target")
+	writeFile(t, target, "")
+	must(t, os.Symlink(target, r.Path(RunDir+"/forward.lock")))
+	_, ok, err = ClaimService(r, "forward")
+	eq(t, err != nil, true)
+	eq(t, ok, false)
+}

@@ -365,6 +365,20 @@ func CloseInherited() {
 
 /* Pid files */
 
+// ClaimService locks the named service's lock file, false while another process holds it
+func ClaimService(r Root, name string) (func(), bool, error) {
+	path := r.Path(RunDir + "/" + name + ".lock")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return nil, false, err
+	}
+	// Only root opens it, so the exec user can never hold it and keep every sampler out
+	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|syscall.O_NOFOLLOW, 0o600)
+	if err != nil {
+		return nil, false, err
+	}
+	return lockFile(f, syscall.LOCK_EX|syscall.LOCK_NB)
+}
+
 func pidPath(r Root, name string) string {
 	return r.Path(PidFile(name))
 }
