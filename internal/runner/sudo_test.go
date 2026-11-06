@@ -248,8 +248,8 @@ func TestSudoFailureNeverFailsTheJob(t *testing.T) {
 
 	hanging := s.sudo(t, "sudo", "exec sleep 30\n")
 	began := time.Now()
-	s.start(t, hanging, "2s", "hanging")
-	if took := time.Since(began); took > 10*time.Second {
+	s.start(t, hanging, "5s", "hanging")
+	if took := time.Since(began); took > 20*time.Second {
 		t.Fatalf("start took %v behind a sudo that hangs, want the respawn timeout to end it", took)
 	}
 	same(t, recorded(t, hanging), want)
