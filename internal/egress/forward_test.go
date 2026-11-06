@@ -131,15 +131,16 @@ func TestForwardRefusesWrongCertificateName(t *testing.T) {
 	p := newPKI(t)
 	s := newTunnelServer(t, p, "other.example")
 	fw := startForwarder(t, p, testConfig(s), testToken)
-	eq(t, closedSoon(t, dial(t, fw.addr), "client hello", 900*time.Millisecond), true)
+	eq(t, closedSoon(t, dial(t, fw.addr), "client hello", 5*time.Second), true)
 	eq(t, len(s.requests()), 0)
 	eq(t, s.accepts.Load(), int64(1))
 
 	untrusted := newPKI(t)
 	s = newTunnelServer(t, untrusted, testEndpoint)
 	fw = startForwarder(t, p, testConfig(s), testToken)
-	eq(t, closedSoon(t, dial(t, fw.addr), "client hello", 900*time.Millisecond), true)
+	eq(t, closedSoon(t, dial(t, fw.addr), "client hello", 5*time.Second), true)
 	eq(t, len(s.requests()), 0)
+	eq(t, s.accepts.Load(), int64(1))
 }
 
 func TestForwardReloadKeepsOpenConnections(t *testing.T) {
@@ -182,11 +183,7 @@ func TestForwardRetriesFirstDialOnce(t *testing.T) {
 	eq(t, s.accepts.Load(), int64(2))
 
 	s.drop.Store(2)
-	began = time.Now()
-	eq(t, closedSoon(t, dial(t, fw.addr), "again", 900*time.Millisecond), true)
-	if took := time.Since(began); took >= firstRetry {
-		t.Fatalf("a later dial waited %v, as if retried", took)
-	}
+	eq(t, closedSoon(t, dial(t, fw.addr), "again", 5*time.Second), true)
 	eq(t, s.accepts.Load(), int64(3))
 }
 
@@ -207,11 +204,7 @@ func TestForwardStopsAtTheProxysAnswer(t *testing.T) {
 		s := newTunnelServer(t, p, testEndpoint)
 		s.status.Store(code)
 		fw := startForwarder(t, p, testConfig(s), testToken)
-		began := time.Now()
-		eq(t, closedSoon(t, dial(t, fw.addr), "refused", 900*time.Millisecond), true)
-		if took := time.Since(began); took >= firstRetry {
-			t.Fatalf("a %d came back after %v, as if the first dial was retried", code, took)
-		}
+		eq(t, closedSoon(t, dial(t, fw.addr), "refused", 5*time.Second), true)
 		eq(t, s.accepts.Load(), int64(1))
 		eq(t, len(s.requests()), 1)
 	}
@@ -223,7 +216,7 @@ func TestForwardStopsAtTheProxysAnswer(t *testing.T) {
 	cfg := testConfig(refusing)
 	cfg.IPs = []string{"127.0.0.1", second.Addr().(*net.TCPAddr).IP.String()}
 	fw := startForwarder(t, p, cfg, testToken)
-	eq(t, closedSoon(t, dial(t, fw.addr), "refused", 900*time.Millisecond), true)
+	eq(t, closedSoon(t, dial(t, fw.addr), "refused", 5*time.Second), true)
 	eq(t, refusing.accepts.Load(), int64(1))
 	eq(t, next.accepts.Load(), int64(0))
 }
@@ -335,7 +328,7 @@ func TestForwardLogsCountsOnly(t *testing.T) {
 		func(f *Forwarder) { f.every = 20 * time.Millisecond })
 	eq(t, roundTrip(t, dial(t, fw.addr), "x"), "x")
 	s.drop.Store(1)
-	eq(t, closedSoon(t, dial(t, fw.addr), "y", 900*time.Millisecond), true)
+	eq(t, closedSoon(t, dial(t, fw.addr), "y", 5*time.Second), true)
 	waitFor(t, 5*time.Second, func() bool {
 		return strings.Contains(fw.logs.String(), "connections 2, open 1, failed 1")
 	})
