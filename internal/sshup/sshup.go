@@ -71,9 +71,11 @@ const (
 
 // Variables so tests can hold a port, stand in for apt-get and usermod, and run under a test root
 var (
-	portFree   = probePort
-	rootSteps  = func(r sandbox.Root) bool { return r.IsSystem() }
-	install    = runInstall
+	portFree  = probePort
+	rootSteps = func(r sandbox.Root) bool { return r.IsSystem() }
+	install   = func(ctx context.Context, timeout time.Duration) error {
+		return runInstall(ctx, lookPath("apt-get", "/usr/bin/apt-get"), timeout)
+	}
 	usermod    = runUsermod
 	systemctl  func(ctx context.Context, args ...string) error
 	listenWait = 10 * time.Second
@@ -613,10 +615,10 @@ func sshdConfig(r sandbox.Root, port int, user, hostKey, setEnv string) string {
 
 /* Host commands */
 
-func runInstall(ctx context.Context, timeout time.Duration) error {
+// runInstall runs apt-get update and install within one timeout, never stopping for a question
+func runInstall(ctx context.Context, apt string, timeout time.Duration) error {
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	apt := lookPath("apt-get", "/usr/bin/apt-get")
 	opts := []string{
 		"-o", "DPkg::Lock::Timeout=" + strconv.Itoa(int(timeout.Seconds())),
 		"-o", "Dpkg::Options::=--force-confdef", "-o", "Dpkg::Options::=--force-confold",

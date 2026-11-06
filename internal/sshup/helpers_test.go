@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -255,6 +256,8 @@ type fixture struct {
 	systemctl  []string
 	// wait, when set, runs the real supervised sshd with this listen wait instead of the fake
 	wait time.Duration
+	// apt, when set, runs the real install against this apt-get stand-in
+	apt string
 }
 
 func newFixture(t *testing.T) *fixture {
@@ -315,6 +318,11 @@ func (f *fixture) tune(u *upper) {
 		}
 		return os.WriteFile(f.sshdPath, []byte("#!/bin/sh\n"), 0o755)
 	}
+	if f.apt != "" {
+		u.install = func(ctx context.Context, timeout time.Duration) error {
+			return runInstall(ctx, f.apt, timeout)
+		}
+	}
 	u.usermod = func(_ context.Context, user string) error {
 		f.mu.Lock()
 		defer f.mu.Unlock()
@@ -370,6 +378,59 @@ func (f *fixture) usermodCalls() []string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return append([]string(nil), f.usermods...)
+}
+
+// aptStandIn is an apt-get stand-in that logs DEBIAN_FRONTEND and its arguments, then sleeps
+type aptStandIn struct {
+	path string
+	dir  string
+}
+
+// fakeApt writes the stand-in and runs it once, so the first run's exec check costs no test time
+func fakeApt(t *testing.T) aptStandIn {
+	t.Helper()
+	a := aptStandIn{dir: t.TempDir()}
+	a.path = filepath.Join(a.dir, "apt-get")
+	// exec makes sleep the process the timeout kills, so no orphan outlives the test
+	writeFile(t, a.path, "#!/bin/sh\n"+
+		"d='"+a.dir+"'\n"+
+		"printf '%s %s\\n' \"DEBIAN_FRONTEND=$DEBIAN_FRONTEND\" \"$*\" >> \"$d/log\"\n"+
+		"case \" $* \" in *' update '*) v=update ;; *) v=install ;; esac\n"+
+		"if [ -s \"$d/exit\" ]; then\n"+
+		"\techo 'E: The repository is not signed.'\n"+
+		"\tread -r code < \"$d/exit\"\n"+
+		"\texit \"$code\"\n"+
+		"fi\n"+
+		"read -r s < \"$d/$v\"\n"+
+		"exec sleep \"$s\"\n")
+	must(t, os.Chmod(a.path, 0o755))
+	a.sleep(t, "0", "0")
+	must(t, exec.Command(a.path, "update").Run())
+	must(t, os.Remove(filepath.Join(a.dir, "log")))
+	return a
+}
+
+// sleep sets how long update and install each take
+func (a aptStandIn) sleep(t *testing.T, update, install string) {
+	t.Helper()
+	writeFile(t, filepath.Join(a.dir, "update"), update+"\n")
+	writeFile(t, filepath.Join(a.dir, "install"), install+"\n")
+}
+
+// exit makes every command print an error and exit with code
+func (a aptStandIn) exit(t *testing.T, code int) {
+	t.Helper()
+	writeFile(t, filepath.Join(a.dir, "exit"), strconv.Itoa(code)+"\n")
+}
+
+// calls returns the lines the stand-in logged and forgets them
+func (a aptStandIn) calls(t *testing.T) string {
+	t.Helper()
+	path := filepath.Join(a.dir, "log")
+	b, err := os.ReadFile(path)
+	must(t, err)
+	must(t, os.Remove(path))
+	return string(b)
 }
 
 /* Processes */

@@ -433,6 +433,46 @@ func TestSshUpWaitsForAnotherInstall(t *testing.T) {
 	eq(t, f.systemctl, []string(nil))
 }
 
+func TestSshUpInstallRunsAptGet(t *testing.T) {
+	t.Parallel()
+	apt := fakeApt(t)
+	must(t, runInstall(context.Background(), apt.path, 120*time.Second))
+	opts := "-o DPkg::Lock::Timeout=120 -o Dpkg::Options::=--force-confdef " +
+		"-o Dpkg::Options::=--force-confold "
+	env := "DEBIAN_FRONTEND=noninteractive "
+	eq(t, apt.calls(t), env+opts+"update\n"+
+		env+opts+"install -y --no-install-recommends openssh-server\n")
+
+	apt.exit(t, 100)
+	err := runInstall(context.Background(), apt.path, 120*time.Second)
+	eq(t, err != nil, true)
+	eq(t, strings.Contains(err.Error(), "apt-get update: exit status 100: E: The repository"),
+		true)
+	eq(t, strings.Count(apt.calls(t), "\n"), 1)
+}
+
+func TestSshUpInstallTimeoutCoversBothCommands(t *testing.T) {
+	t.Parallel()
+	apt := fakeApt(t)
+	// Each command alone fits the timeout
+	for _, sleeps := range [][2]string{{"1.2", "0"}, {"0", "1.2"}} {
+		apt.sleep(t, sleeps[0], sleeps[1])
+		must(t, runInstall(context.Background(), apt.path, 2*time.Second))
+	}
+
+	f := newFixture(t)
+	f.system = true
+	must(t, os.Remove(f.sshdPath))
+	apt.sleep(t, "1.2", "1.2")
+	f.apt = apt.path
+	s := f.spec()
+	s.Install, s.InstallTimeoutS = true, 2
+	line, code := f.up(t, s)
+	eq(t, line, `{"error":"install_failed"}`)
+	eq(t, code, 1)
+	eq(t, f.sshd.take(), []string(nil))
+}
+
 func TestSshUpStopsTheDistroSshdItInstalled(t *testing.T) {
 	t.Parallel()
 	f := newFixture(t)

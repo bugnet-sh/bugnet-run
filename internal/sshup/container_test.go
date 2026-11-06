@@ -238,6 +238,10 @@ func TestContainerSshUpInstallsOnEmptyLists(t *testing.T) {
 			s.Install = true
 			res := mustUp(t, id, s)
 			eq(t, res.Port, 22)
+			// openssh-server and openssh-client recommend both, so a full install would add them
+			for _, pkg := range []string{"xauth", "ncurses-term"} {
+				eq(t, failsInContainer(id, "dpkg -s "+pkg), true)
+			}
 			eq(t, inContainer(t, id, "cat /etc/bugnet/ssh/port"), "22")
 			pid := inContainer(t, id, "cat /run/bugnet/sshd.pid")
 			// sshd retitles its listener, keeping the command line inside the title
