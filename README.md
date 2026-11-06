@@ -41,8 +41,10 @@ Both are left out when they are zero or false.
 Where `/sys/fs/cgroup` is a cgroup v2 mount the supervisor can write, the job runs in a cgroup
 of its own, `/sys/fs/cgroup/bugnet/jobs/<id>`:
 
-- The supervisor makes it and writes `+memory`, `+cpu` and `+io`, one at a time, to the
-  `cgroup.subtree_control` of the root, `bugnet` and `bugnet/jobs`.
+- The supervisor makes it and writes `+memory` to the `cgroup.subtree_control` of the root,
+  `bugnet` and `bugnet/jobs`. Only where the kernel takes `+memory` does it add `+cpu` and
+  `+io`, one at a time. `cpu` alone on a namespace root that holds processes would make it a
+  thread root, below which no job cgroup can start.
 - The command starts straight in it, through `clone3`. When the kernel refuses that, the command
   starts again outside it.
 - At exit, `pk` comes from `memory.peak`, and `oom` is true when `memory.events` counts an

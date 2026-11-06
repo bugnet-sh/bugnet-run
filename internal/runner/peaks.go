@@ -110,7 +110,11 @@ func enableControllers(dir string) {
 		return
 	}
 	defer func() { _ = f.Close() }()
-	for _, c := range []string{"+memory", "+cpu", "+io"} {
+	// cpu alone on a busy namespace root makes it a thread root, and no job cgroup can start below
+	if _, err := f.WriteString("+memory"); err != nil {
+		return
+	}
+	for _, c := range []string{"+cpu", "+io"} {
 		_, _ = f.WriteString(c)
 	}
 }
