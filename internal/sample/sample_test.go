@@ -106,7 +106,7 @@ func TestSampleCPU(t *testing.T) {
 	}
 	st := f.s.stats()
 	eq(t, st.CPUSeconds, uint64(4)) // 350 busy jiffies at 100 a second, rounded
-	// Per second: 1000, 2000, 0 and 500 millicores, so the 95th percentile is the busiest
+	// The seconds hold 1000, 2000, 0 and 500 millicores, so the 95th percentile is the busiest
 	eq(t, st.BusyP95Millicores, uint64(2000))
 }
 
