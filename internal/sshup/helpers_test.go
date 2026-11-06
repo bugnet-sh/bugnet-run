@@ -116,12 +116,17 @@ func freePort(t *testing.T) int {
 
 // fakeDaemon stands in for our supervised sshd and records what ssh-up asked of it
 type fakeDaemon struct {
-	mu       sync.Mutex
-	running  bool
-	calls    []string
-	checked  []string
-	refuse   bool
-	failWait bool
+	mu sync.Mutex
+	// keyFile is the host key the fake reads on a start or SIGHUP, as sshd does
+	keyFile string
+	running bool
+	calls   []string
+	checked []string
+	// checkedKeys holds the public line of the key each checked config named, read at the check
+	checkedKeys []string
+	serving     string
+	refuse      bool
+	failWait    bool
 }
 
 func (d *fakeDaemon) Running() bool {
@@ -135,6 +140,7 @@ func (d *fakeDaemon) Check(_ context.Context, path string, config []byte) error 
 	defer d.mu.Unlock()
 	d.calls = append(d.calls, "check "+path)
 	d.checked = append(d.checked, string(config))
+	d.checkedKeys = append(d.checkedKeys, keyLine(configHostKey(string(config))))
 	if d.refuse {
 		return errors.New("sshd -t refused the config")
 	}
@@ -146,6 +152,7 @@ func (d *fakeDaemon) Start(context.Context) error {
 	defer d.mu.Unlock()
 	d.calls = append(d.calls, "start")
 	d.running = true
+	d.serving = keyLine(d.keyFile)
 	return nil
 }
 
@@ -154,6 +161,7 @@ func (d *fakeDaemon) Restart(context.Context) error {
 	defer d.mu.Unlock()
 	d.calls = append(d.calls, "restart")
 	d.running = true
+	d.serving = keyLine(d.keyFile)
 	return nil
 }
 
@@ -161,7 +169,49 @@ func (d *fakeDaemon) Reload() error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	d.calls = append(d.calls, "hup")
+	d.serving = keyLine(d.keyFile)
 	return nil
+}
+
+// served returns the public line of the host key the fake loaded last
+func (d *fakeDaemon) served() string {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.serving
+}
+
+// keyLine returns the public line of the key file at path, empty when it holds no key
+func keyLine(path string) string {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	line, _ := publicLine(b)
+	return line
+}
+
+// configHostKey returns the path an sshd_config's HostKey line names
+func configHostKey(config string) string {
+	for l := range strings.Lines(config) {
+		if path, ok := strings.CutPrefix(strings.TrimSuffix(l, "\n"), "HostKey "); ok {
+			return path
+		}
+	}
+	return ""
+}
+
+// dotFiles lists the names in /etc/bugnet/ssh that start with a dot
+func dotFiles(t *testing.T, root sandbox.Root) []string {
+	t.Helper()
+	entries, err := os.ReadDir(root.Path(sandbox.SSHDir))
+	must(t, err)
+	var names []string
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), ".") {
+			names = append(names, e.Name())
+		}
+	}
+	return names
 }
 
 func (d *fakeDaemon) Wait(_ context.Context, port int) error {
@@ -211,7 +261,10 @@ func newFixture(t *testing.T) *fixture {
 	t.Helper()
 	root, err := sandbox.NewRoot(t.TempDir())
 	must(t, err)
-	f := &fixture{root: root, dir: t.TempDir(), sshd: &fakeDaemon{}, held: map[int]bool{}}
+	f := &fixture{
+		root: root, dir: t.TempDir(), sshd: &fakeDaemon{keyFile: root.Path(sandbox.HostKeyFile)},
+		held: map[int]bool{},
+	}
 	f.sshdPath = filepath.Join(f.dir, "sbin", "sshd")
 	writeFile(t, f.sshdPath, "#!/bin/sh\n")
 	must(t, os.Chmod(f.sshdPath, 0o755))

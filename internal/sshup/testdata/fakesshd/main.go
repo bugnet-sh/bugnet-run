@@ -38,6 +38,11 @@ func main() {
 		if cfg["refuse"] != "" {
 			die("refused SetEnv " + cfg["setenv"])
 		}
+		if key := cfg["hostkey"]; key != "" {
+			if _, err := os.ReadFile(key); err != nil {
+				die("no hostkeys available")
+			}
+		}
 		return
 	}
 	logPath := filepath.Join(filepath.Dir(cfgPath), "fake-sshd.log")

@@ -58,7 +58,7 @@ func TestSshUpKeepsThePortOfARunningSshd(t *testing.T) {
 func TestSshdConfigLines(t *testing.T) {
 	t.Parallel()
 	f := newFixture(t)
-	f.sshUp(t, f.spec())
+	out := f.sshUp(t, f.spec())
 	c := f.read(t, sandbox.SSHDConfig)
 	eq(t, strings.Contains(c, "Include"), false)
 	eq(t, strings.Count(c, "SetEnv "), 1)
@@ -95,7 +95,16 @@ func TestSshdConfigLines(t *testing.T) {
 		"ClientAliveInterval 30\n"+
 		"ClientAliveCountMax 3\n")
 	eq(t, mode(t, r.Path(sandbox.SSHDConfig)), os.FileMode(0o644))
-	eq(t, f.sshd.checked, []string{c})
+	// The check read the new key where it waited, beside the key file
+	eq(t, len(f.sshd.checked), 1)
+	pending := configHostKey(f.sshd.checked[0])
+	eq(t, filepath.Dir(pending), r.Path(sandbox.SSHDir))
+	eq(t, strings.HasPrefix(filepath.Base(pending), ".host_ed25519_key.new-"), true)
+	eq(t, strings.Replace(f.sshd.checked[0], "HostKey "+pending+"\n",
+		"HostKey "+r.Path(sandbox.HostKeyFile)+"\n", 1), c)
+	eq(t, f.sshd.checkedKeys, []string{out.HostKey})
+	eq(t, exists(pending), false)
+	eq(t, dotFiles(t, r), []string(nil))
 	eq(t, f.read(t, sandbox.SSHDPathFile), f.sshdPath+"\n")
 	for _, dir := range []string{sandbox.SSHDir, sandbox.RunDir, sandbox.SSHDRunDir} {
 		eq(t, mode(t, r.Path(dir)), os.FileMode(0o755))
@@ -207,6 +216,84 @@ func TestSshUpKeepsAWorkingSshdWhenTheCheckFails(t *testing.T) {
 	f.sshd.refuse, f.sshd.failWait = false, true
 	line, _ = f.up(t, f.spec())
 	eq(t, line, `{"error":"sshd_failed"}`)
+
+	// The port file keeps naming the port sshd listens on until a new config passes the check
+	f = newFixture(t).holding(22)
+	eq(t, f.sshUp(t, f.spec()).Port, 2022)
+	f.held = map[int]bool{2022: true}
+	f.sshd.take()
+	f.sshd.refuse = true
+	s := f.spec()
+	s.Ports = []int{22}
+	line, _ = f.up(t, s)
+	eq(t, line, `{"error":"sshd_failed"}`)
+	eq(t, f.read(t, sandbox.SSHPortFile), "2022\n")
+	eq(t, f.sshd.take(), []string(nil))
+
+	f.sshd.refuse, f.sshd.failWait = false, true
+	line, _ = f.up(t, s)
+	eq(t, line, `{"error":"sshd_failed"}`)
+	eq(t, f.sshd.take(), []string{"hup", "wait 22"})
+	eq(t, f.read(t, sandbox.SSHPortFile), "22\n")
+}
+
+func TestSshUpReportsTheKeySshdServes(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t)
+	first := f.sshUp(t, f.spec())
+	eq(t, f.sshd.served(), first.HostKey)
+	keyFile := f.root.Path(sandbox.HostKeyFile)
+	pem := f.read(t, sandbox.HostKeyFile)
+	f.sshd.take()
+
+	f.sshd.refuse = true
+	line, code := f.up(t, f.spec(), "--new-host-key")
+	eq(t, line, `{"error":"sshd_failed"}`)
+	eq(t, code, 1)
+	eq(t, f.read(t, sandbox.HostKeyFile), pem)
+	eq(t, dotFiles(t, f.root), []string(nil))
+	f.sshd.refuse = false
+	again := f.sshUp(t, f.spec())
+	eq(t, again.HostKey, first.HostKey)
+	eq(t, f.sshd.served(), again.HostKey)
+	eq(t, f.sshd.take(), []string{"wait 22"})
+
+	// sshd took the new key with its SIGHUP, so a wait that fails leaves both on the new key
+	f.sshd.failWait = true
+	line, _ = f.up(t, f.spec(), "--new-host-key")
+	eq(t, line, `{"error":"sshd_failed"}`)
+	f.sshd.failWait = false
+	fresh := f.sshUp(t, f.spec())
+	eq(t, fresh.HostKey != first.HostKey, true)
+	eq(t, f.sshd.served(), fresh.HostKey)
+	eq(t, f.sshd.take(), []string{"hup", "wait 22", "wait 22"})
+
+	writeFile(t, keyFile, "not a key\n")
+	must(t, os.Chmod(keyFile, 0o600))
+	f.sshd.refuse = true
+	line, _ = f.up(t, f.spec())
+	eq(t, line, `{"error":"sshd_failed"}`)
+	eq(t, f.read(t, sandbox.HostKeyFile), "not a key\n")
+	f.sshd.refuse = false
+	last := f.sshUp(t, f.spec())
+	eq(t, f.sshd.served(), last.HostKey)
+	eq(t, f.sshd.take(), []string{"hup", "wait 22"})
+	eq(t, dotFiles(t, f.root), []string(nil))
+}
+
+func TestSshUpClearsWhatAKilledRunLeft(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t)
+	f.sshUp(t, f.spec())
+	dir := f.root.Path(sandbox.SSHDir)
+	for _, name := range []string{".sshd_config.check-1", ".host_ed25519_key.new-2",
+		".port.bugnet-3"} {
+		writeFile(t, filepath.Join(dir, name), "left by a killed run\n")
+	}
+	f.sshUp(t, f.spec())
+	eq(t, dotFiles(t, f.root), []string(nil))
+	eq(t, exists(f.root.Path(sandbox.HostKeyFile)), true)
+	eq(t, exists(f.root.Path(sandbox.AuthorizedKeys)), true)
 }
 
 func TestSshUpHostKey(t *testing.T) {
@@ -496,6 +583,10 @@ func TestCheckRedactsPlaceholders(t *testing.T) {
 		"SetEnv HF_TOKEN=bnsec_" + strings.Repeat("a", 26) + "\n"
 	must(t, d.Check(context.Background(), fakeSSHDPath, []byte(cfg)))
 
+	err = d.Check(context.Background(), fakeSSHDPath, []byte(cfg+"HostKey "+
+		root.Path(sandbox.HostKeyFile)+"\n"))
+	eq(t, err != nil, true)
+
 	err = d.Check(context.Background(), fakeSSHDPath, []byte(cfg+"Refuse yes\n"))
 	if err == nil {
 		t.Fatal("a refused config passed the check")
@@ -511,4 +602,5 @@ func TestRedact(t *testing.T) {
 	t.Parallel()
 	eq(t, string(redact([]byte("A=bnsec_abcz234567 B=bnsec_ C=bnsec_x9 bnsec"))),
 		"A=bnsec_ B=bnsec_ C=bnsec_9 bnsec")
+
 }

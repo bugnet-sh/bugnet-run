@@ -164,23 +164,26 @@ Then, in this order:
    `apt-get install -y --no-install-recommends openssh-server`, with `DEBIAN_FRONTEND` set to
    `noninteractive`, within `install_timeout_s` for both. If the install started a distro sshd,
    it is stopped and disabled. This step runs outside the sandbox lock, and never under `--root`.
-2. It keeps the port of our running sshd. Otherwise it binds `127.0.0.1` on each of `ports` in
-   turn for a moment, takes the first that binds, and writes it to `/etc/bugnet/ssh/port`.
-3. It generates `/etc/bugnet/ssh/host_ed25519_key` (0600) unless a readable one exists.
-   `--new-host-key` always makes a new one.
-4. It adds each `authorize` line to `/etc/bugnet/ssh/authorized_keys` (0644) unless it is there.
+2. Under the sandbox lock, it removes the dot-files in `/etc/bugnet/ssh` that a killed run left.
+3. It keeps the port of our running sshd. Otherwise it binds `127.0.0.1` on each of `ports` in
+   turn for a moment and takes the first that binds.
+4. It keeps `/etc/bugnet/ssh/host_ed25519_key` when it holds a readable key, and sets it to 0600.
+   Otherwise, or with `--new-host-key`, it writes a new key (0600) to a temporary file beside it.
+5. It adds each `authorize` line to `/etc/bugnet/ssh/authorized_keys` (0644) unless it is there.
    Other lines are kept.
-5. If the user's password field in `/etc/shadow` starts with `!`, it runs `usermod -p '*'`, since
+6. If the user's password field in `/etc/shadow` starts with `!`, it runs `usermod -p '*'`, since
    sshd without PAM refuses a locked account. Never under `--root`.
-6. It creates `/run/sshd` and `/run/bugnet` (0755).
-7. It writes `/etc/bugnet/ssh/sshd_config` and records `sshd_path` in `/etc/bugnet/ssh/sshd_path`.
-   A new config is first checked with `sshd -t`. Then it starts our sshd under systemd or
-   `setsid`. A running sshd gets `SIGHUP` when its config or host key changed, and a restart when
-   `sshd_path` changed.
-8. It waits up to 10 s for `127.0.0.1:<port>` to accept.
+7. It creates `/run/sshd` and `/run/bugnet` (0755).
+8. A new config, a new key or a new `sshd_path` is first checked with `sshd -t`, reading the new
+   key where it waits. Only then does it write `/etc/bugnet/ssh/sshd_config`, `sshd_path` and
+   `port`, and rename the new key over `host_ed25519_key`. A refused check changes none of them.
+9. It starts our sshd under systemd or `setsid`. A running sshd gets `SIGHUP` when its config or
+   host key changed, and a restart when `sshd_path` changed.
+10. It waits up to 10 s for `127.0.0.1:<port>` to accept.
 
-It prints `{"port":22,"host_key":"ssh-ed25519 AAAA..."}` and exits 0. A second run with the same
-spec changes no file and keeps the same sshd. On an error it prints one of these and exits 1:
+It prints `{"port":22,"host_key":"ssh-ed25519 AAAA..."}` and exits 0. The key it prints is the one
+our sshd serves. A second run with the same spec changes no file and keeps the same sshd. On an
+error it prints one of these and exits 1:
 
 | Error | Cause |
 |---|---|

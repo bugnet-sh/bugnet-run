@@ -65,6 +65,8 @@ const (
 	distroStopWait  = 3 * time.Second
 	distroSSHDPid   = "/run/sshd.pid"
 	installedMarker = "sshd"
+	checkPrefix     = ".sshd_config.check-"
+	newKeyPrefix    = ".host_ed25519_key.new-"
 )
 
 // Variables so tests can hold a port, stand in for apt-get and usermod, and run under a test root
@@ -270,19 +272,19 @@ func (u upper) up(ctx context.Context, s Spec) (Result, error) {
 		return Result{}, fail(ErrSSHDFailed, err)
 	}
 	defer unlock()
+	if err := clearLeftovers(u.root); err != nil {
+		return Result{}, fail(ErrSSHDFailed, err)
+	}
 
 	port, ok := u.pickPort(s.Ports)
 	if !ok {
 		return Result{}, fail(ErrPortsTaken, errors.New("every port in the spec is taken"))
 	}
-	if _, err := sandbox.WriteFile(u.root.Path(sandbox.SSHPortFile),
-		[]byte(strconv.Itoa(port)+"\n"), 0o644); err != nil {
-		return Result{}, fail(ErrSSHDFailed, err)
-	}
-	hostKey, keyChanged, err := u.hostKey()
+	key, err := u.hostKey()
 	if err != nil {
 		return Result{}, fail(ErrSSHDFailed, err)
 	}
+	defer key.drop()
 	if err := u.authorize(s.Authorize); err != nil {
 		return Result{}, fail(ErrSSHDFailed, err)
 	}
@@ -294,10 +296,10 @@ func (u upper) up(ctx context.Context, s Spec) (Result, error) {
 	if err := u.sup.Prepare(sandbox.SSHD); err != nil {
 		return Result{}, fail(ErrSSHDFailed, err)
 	}
-	if err := u.runSSHD(ctx, s, port, keyChanged); err != nil {
+	if err := u.runSSHD(ctx, s, port, key); err != nil {
 		return Result{}, fail(ErrSSHDFailed, err)
 	}
-	return Result{Port: port, HostKey: hostKey}, nil
+	return Result{Port: port, HostKey: key.line}, nil
 }
 
 // ensureSSHD installs openssh-server only where the spec allows it and the root is the sandbox's
@@ -356,6 +358,25 @@ func makeDirs(root sandbox.Root) error {
 	return nil
 }
 
+// clearLeftovers removes the dot-files a killed run left, as every writer there holds the lock
+func clearLeftovers(r sandbox.Root) error {
+	dir := r.Path(sandbox.SSHDir)
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return err
+	}
+	for _, e := range entries {
+		if !strings.HasPrefix(e.Name(), ".") || !e.Type().IsRegular() {
+			continue
+		}
+		if err := os.Remove(filepath.Join(dir, e.Name())); err != nil &&
+			!errors.Is(err, fs.ErrNotExist) {
+			return err
+		}
+	}
+	return nil
+}
+
 // pickPort keeps the port of our running sshd, which the probe would find taken by sshd itself
 func (u upper) pickPort(ports []int) (int, bool) {
 	if u.sshd.Running() {
@@ -383,25 +404,52 @@ func probePort(port int) bool {
 	return true
 }
 
-// hostKey keeps a readable key unless told to replace it, reporting whether the key changed
-func (u upper) hostKey() (string, bool, error) {
+// hostKey is the key ssh-up reports, a new one waiting in its own file until sshd takes it
+type hostKey struct {
+	line    string
+	pending string
+}
+
+// drop removes a new key that never replaced the old one
+func (k hostKey) drop() {
+	if k.pending != "" {
+		_ = os.Remove(k.pending)
+	}
+}
+
+// hostKey keeps a readable key unless told to replace it, writing a new one beside it
+func (u upper) hostKey() (hostKey, error) {
 	path := u.root.Path(sandbox.HostKeyFile)
 	if !u.newHostKey {
 		if b, err := os.ReadFile(path); err == nil {
 			if line, err := publicLine(b); err == nil {
 				// sshd refuses a host key that others can read
-				return line, false, os.Chmod(path, 0o600)
+				return hostKey{line: line}, os.Chmod(path, 0o600)
 			}
 		}
 	}
 	text, line, err := newHostKey()
 	if err != nil {
-		return "", false, err
+		return hostKey{}, err
 	}
-	if _, err := sandbox.WriteFile(path, text, 0o600); err != nil {
-		return "", false, err
+	// CreateTemp makes the file 0600, which sshd asks of a host key
+	tmp, err := os.CreateTemp(filepath.Dir(path), newKeyPrefix+"*")
+	if err != nil {
+		return hostKey{}, err
 	}
-	return line, true, nil
+	key := hostKey{line: line, pending: tmp.Name()}
+	_, err = tmp.Write(text)
+	if err == nil {
+		err = tmp.Sync()
+	}
+	if cerr := tmp.Close(); err == nil {
+		err = cerr
+	}
+	if err != nil {
+		key.drop()
+		return hostKey{}, err
+	}
+	return key, nil
 }
 
 // authorize appends the lines not already there, leaving every other line as it is
@@ -449,32 +497,47 @@ func (u upper) unlockPassword(ctx context.Context, user string) error {
 	return nil
 }
 
-// runSSHD checks a new config before it replaces the one a running sshd uses
-func (u upper) runSSHD(ctx context.Context, s Spec, port int, keyChanged bool) error {
+// runSSHD leaves every file a running sshd reads alone until the new config and key pass the check
+func (u upper) runSSHD(ctx context.Context, s Spec, port int, key hostKey) error {
 	setEnv, err := sandbox.SetEnvLine(u.root)
 	if err != nil {
 		return err
 	}
-	cfgPath := u.root.Path(sandbox.SSHDConfig)
-	config := []byte(sshdConfig(u.root, port, s.User, setEnv))
-	old, err := os.ReadFile(cfgPath)
+	keyPath := u.root.Path(sandbox.HostKeyFile)
+	config := []byte(sshdConfig(u.root, port, s.User, keyPath, setEnv))
+	old, err := os.ReadFile(u.root.Path(sandbox.SSHDConfig))
 	if err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return err
 	}
 	cfgChanged := !bytes.Equal(old, config)
+	keyChanged := key.pending != ""
 	pathChanged := sandbox.SSHDPath(u.root) != s.SSHDPath
 	running := u.sshd.Running()
 	if !running || cfgChanged || keyChanged || pathChanged {
-		if err := u.sshd.Check(ctx, s.SSHDPath, config); err != nil {
+		checked := config
+		if keyChanged {
+			checked = []byte(sshdConfig(u.root, port, s.User, key.pending, setEnv))
+		}
+		if err := u.sshd.Check(ctx, s.SSHDPath, checked); err != nil {
 			return err
 		}
 	}
-	if _, err := sandbox.WriteFile(u.root.Path(sandbox.SSHDPathFile), []byte(s.SSHDPath+"\n"),
-		0o644); err != nil {
-		return err
+	for _, f := range []struct {
+		path string
+		data []byte
+	}{
+		{sandbox.SSHDPathFile, []byte(s.SSHDPath + "\n")},
+		{sandbox.SSHDConfig, config},
+		{sandbox.SSHPortFile, []byte(strconv.Itoa(port) + "\n")},
+	} {
+		if _, err := sandbox.WriteFile(u.root.Path(f.path), f.data, 0o644); err != nil {
+			return err
+		}
 	}
-	if _, err := sandbox.WriteFile(cfgPath, config, 0o644); err != nil {
-		return err
+	if keyChanged {
+		if err := os.Rename(key.pending, keyPath); err != nil {
+			return err
+		}
 	}
 	switch {
 	case !running:
@@ -491,11 +554,11 @@ func (u upper) runSSHD(ctx context.Context, s Spec, port int, keyChanged bool) e
 }
 
 // sshdConfig is DP 6.4's text, with no Include since E2B's drop-in allows empty passwords
-func sshdConfig(r sandbox.Root, port int, user, setEnv string) string {
+func sshdConfig(r sandbox.Root, port int, user, hostKey, setEnv string) string {
 	lines := []string{
 		"Port " + strconv.Itoa(port),
 		"ListenAddress 127.0.0.1",
-		"HostKey " + r.Path(sandbox.HostKeyFile),
+		"HostKey " + hostKey,
 		"AuthorizedKeysFile " + r.Path(sandbox.AuthorizedKeys),
 		"AllowUsers " + user,
 		"PidFile " + r.Path(sandbox.PidFile(sandbox.SSHD.Name)),
@@ -588,7 +651,7 @@ type supervised struct {
 func (s supervised) Running() bool { return s.sup.Running(sandbox.SSHD) }
 
 func (s supervised) Check(ctx context.Context, sshdPath string, config []byte) error {
-	tmp, err := os.CreateTemp(s.sup.Root.Path(sandbox.SSHDir), ".sshd_config.check-*")
+	tmp, err := os.CreateTemp(s.sup.Root.Path(sandbox.SSHDir), checkPrefix+"*")
 	if err != nil {
 		return err
 	}

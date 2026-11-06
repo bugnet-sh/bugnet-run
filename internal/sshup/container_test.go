@@ -169,15 +169,25 @@ func clientKey(t *testing.T, id string) string {
 // login runs cmd over ssh from inside the container, pinning the host key ssh-up reported
 func login(t *testing.T, id, user string, res Result, cmd string) string {
 	t.Helper()
+	pin(t, id, res)
+	return inContainer(t, id, sshCommand(user, res, cmd))
+}
+
+// pin makes the host key ssh-up reported the only one the container's ssh client accepts
+func pin(t *testing.T, id string, res Result) {
+	t.Helper()
 	host := "127.0.0.1"
 	if res.Port != 22 {
 		host = "[127.0.0.1]:" + strconv.Itoa(res.Port)
 	}
 	docker(t, []byte(host+" "+res.HostKey+"\n"), "exec", "-i", id, "sh", "-c",
 		"cat > /root/known_hosts")
-	return inContainer(t, id, "ssh -i /root/k -o IdentitiesOnly=yes -o BatchMode=yes "+
-		"-o StrictHostKeyChecking=yes -o UserKnownHostsFile=/root/known_hosts -p "+
-		strconv.Itoa(res.Port)+" "+user+"@127.0.0.1 "+cmd)
+}
+
+func sshCommand(user string, res Result, cmd string) string {
+	return "ssh -i /root/k -o IdentitiesOnly=yes -o BatchMode=yes " +
+		"-o StrictHostKeyChecking=yes -o UserKnownHostsFile=/root/known_hosts -p " +
+		strconv.Itoa(res.Port) + " " + user + "@127.0.0.1 " + cmd
 }
 
 // sessionEnv returns the environment a new ssh session sees
@@ -252,6 +262,15 @@ func TestContainerSshUpInstallsOnEmptyLists(t *testing.T) {
 			eq(t, login(t, id, "root", moved, "id -un"), "root")
 			eq(t, strings.Count(inContainer(t, id, "cat /etc/bugnet/ssh/authorized_keys"), "\n"),
 				1)
+
+			fresh := mustUp(t, id, s, "--new-host-key")
+			eq(t, fresh.Port, 2022)
+			eq(t, fresh.HostKey != moved.HostKey, true)
+			eq(t, inContainer(t, id, "ls -A /etc/bugnet/ssh"),
+				"authorized_keys\nhost_ed25519_key\nport\nsshd_config\nsshd_path")
+			// sshd closes its listener for a moment while it runs itself again after SIGHUP
+			pin(t, id, fresh)
+			waitIn(t, id, sshCommand("root", fresh, "true"))
 		})
 	}
 }
