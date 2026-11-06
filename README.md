@@ -319,8 +319,9 @@ respawn both started, before the first wrote its pid file, runs once. It writes
 `/run/bugnet/sample.pid`, and then:
 
 - Every second it reads `/proc/meminfo`, the `oom_kill` count in `/proc/vmstat` and the `cpu`
-  lines of `/proc/stat`, and it runs `statfs` on `/`, `/tmp`, `/root` and each directory in
-  `/home`. A filesystem counts once, and `tmpfs` not at all, since memory already counts it.
+  lines of `/proc/stat`, and it runs `statfs` on `/`, `/tmp`, `/root` and the first 16
+  directories in `/home` by name. A filesystem counts once, and `tmpfs` not at all, since memory
+  already counts it.
 - Every 5 s it runs `nvidia-smi --query-gpu=memory.used,memory.total
   --format=csv,noheader,nounits` when that exists, within 3 s.
 - At the first reading, every 5 s and at `SIGTERM`, it writes `/tmp/bugnet/stats.json` (0644)
