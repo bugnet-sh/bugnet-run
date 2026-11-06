@@ -54,7 +54,14 @@ const (
 	// busyBucket is the width of the busy histogram's buckets, in millicores
 	busyBucket = 10
 	maxHomes   = 16
+	// maxStatsBytes bounds the earlier stats file a new sampler reads
+	maxStatsBytes = 4096
+	// maxCarried bounds each number carried from an earlier sampler, far above any real sandbox
+	maxCarried = 1 << 40
 )
+
+// pace spaces the readings, the writes and the GPU readings
+type pace struct{ read, write, gpu time.Duration }
 
 // sampler keeps the maxima of the readings it takes
 type sampler struct {
@@ -75,9 +82,11 @@ type sampler struct {
 	busyCount               uint64
 	oomStart, oomNow        uint64
 	oomSeen                 bool
-	gpuPeak                 uint64
-	samples                 uint64
-	updated                 time.Time
+	// oomBase counts the kills an earlier sampler of this sandbox saw
+	oomBase uint64
+	gpuPeak uint64
+	samples uint64
+	updated time.Time
 }
 
 func newSampler(procDir, out string) *sampler {
@@ -89,6 +98,14 @@ func newSampler(procDir, out string) *sampler {
 
 // Run is bugnet-run sample, which runs until SIGTERM
 func Run(args []string, stderr io.Writer) int {
+	signal.Ignore(syscall.SIGHUP)
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, os.Interrupt)
+	defer stop()
+	p := pace{read: readEvery, write: writeEvery, gpu: gpuEvery}
+	return serve(ctx, args, stderr, "/proc", p)
+}
+
+func serve(ctx context.Context, args []string, stderr io.Writer, procDir string, p pace) int {
 	flags := flag.NewFlagSet("sample", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
 	configPath := flags.String("config", "", "sample.json, /etc/bugnet/sample.json under the root")
@@ -112,12 +129,10 @@ func Run(args []string, stderr io.Writer) int {
 		return fatal(stderr, err)
 	}
 	defer sandbox.RemovePidFile(root, sandbox.Sample.Name, pid)
-	signal.Ignore(syscall.SIGHUP)
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, os.Interrupt)
-	defer stop()
-	s := newSampler("/proc", root.Path(StatsFile))
+	s := newSampler(procDir, root.Path(StatsFile))
 	s.paths = diskPaths(root.Dir())
-	s.run(ctx, readEvery, writeEvery, gpuEvery)
+	s.resume()
+	s.run(ctx, p)
 	return 0
 }
 
@@ -167,18 +182,18 @@ func diskPaths(dir string) func() []string {
 	}
 }
 
-func (s *sampler) run(ctx context.Context, every, writeAfter, gpuAfter time.Duration) {
-	tick := time.NewTicker(every)
+func (s *sampler) run(ctx context.Context, p pace) {
+	tick := time.NewTicker(p.read)
 	defer tick.Stop()
 	var wrote, gpuRead time.Time
 	for {
 		now := time.Now()
-		if gpuRead.IsZero() || now.Sub(gpuRead) >= gpuAfter {
+		if gpuRead.IsZero() || now.Sub(gpuRead) >= p.gpu {
 			s.readGPU(ctx)
 			gpuRead = now
 		}
 		s.read(now)
-		if wrote.IsZero() || now.Sub(wrote) >= writeAfter {
+		if wrote.IsZero() || now.Sub(wrote) >= p.write {
 			_ = s.write()
 			wrote = now
 		}
@@ -189,6 +204,51 @@ func (s *sampler) run(ctx context.Context, every, writeAfter, gpuAfter time.Dura
 		case <-tick.C:
 		}
 	}
+}
+
+// resume carries on from an earlier sampler's stats file, so a respawn keeps every peak
+func (s *sampler) resume() {
+	prev, ok := readStats(s.out)
+	if !ok || max(prev.MemPeakMiB, prev.SwapPeakMiB, prev.DiskPeakMiB, prev.CPUSeconds,
+		prev.BusyP95Millicores, prev.GPUMemPeakMiB, prev.OOMKills, prev.Samples) > maxCarried {
+		return
+	}
+	s.memPeakKiB, s.swapPeakKiB = prev.MemPeakMiB*1024, prev.SwapPeakMiB*1024
+	// Disk growth after this start counts from the level at this start
+	s.diskPeak = prev.DiskPeakMiB << 20
+	s.busyJiffies = prev.CPUSeconds * clockTicks
+	s.gpuPeak, s.oomBase, s.samples = prev.GPUMemPeakMiB, prev.OOMKills, prev.Samples
+	// The earlier seconds count at their 95th percentile, since only that survives
+	if prev.Samples > 0 {
+		s.busy[(prev.BusyP95Millicores+busyBucket/2)/busyBucket] = prev.Samples
+		s.busyCount = prev.Samples
+	}
+}
+
+// readStats reads a stats file strictly, never following a link or waiting on a FIFO
+func readStats(path string) (Stats, bool) {
+	var st Stats
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		return st, false
+	}
+	defer func() { _ = f.Close() }()
+	if info, err := f.Stat(); err != nil || !info.Mode().IsRegular() {
+		return st, false
+	}
+	b, err := io.ReadAll(io.LimitReader(f, maxStatsBytes+1))
+	if err != nil || len(b) > maxStatsBytes {
+		return st, false
+	}
+	dec := json.NewDecoder(bytes.NewReader(b))
+	dec.DisallowUnknownFields()
+	if dec.Decode(&st) != nil || st.V != 1 {
+		return st, false
+	}
+	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
+		return st, false
+	}
+	return st, true
 }
 
 /* Readings */
@@ -348,8 +408,9 @@ func (s *sampler) stats() Stats {
 			clockTicks, BusyP95Millicores: s.busyP95(), GPUMemPeakMiB: s.gpuPeak,
 		Samples: s.samples, UpdatedAt: s.updated.UTC().Format(time.RFC3339),
 	}
+	st.OOMKills = s.oomBase
 	if s.oomNow > s.oomStart {
-		st.OOMKills = s.oomNow - s.oomStart
+		st.OOMKills += s.oomNow - s.oomStart
 	}
 	return st
 }

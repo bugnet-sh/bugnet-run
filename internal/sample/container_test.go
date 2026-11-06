@@ -97,6 +97,12 @@ func TestContainerSampleReadsTheSandbox(t *testing.T) {
 			pid := inContainer(t, id, "cat /run/bugnet/sample.pid")
 			inContainer(t, id, "kill "+pid)
 			eq(t, inContainer(t, id, "bugnet-run respawn"), `{"started":["sample"]}`)
+			// The respawned sampler carries the killed one's peaks on
+			again := statsIn(t, id, st.Samples+2)
+			eq(t, inContainer(t, id, "cat /run/bugnet/sample.pid") != pid, true)
+			eq(t, again.CPUSeconds >= st.CPUSeconds, true)
+			eq(t, again.MemPeakMiB >= st.MemPeakMiB, true)
+			eq(t, again.BusyP95Millicores >= 900, true)
 		})
 	}
 }

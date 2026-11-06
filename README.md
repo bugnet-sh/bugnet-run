@@ -328,6 +328,12 @@ and then:
 
 Every number is whole. A source the sandbox lacks is skipped, and its fields stay 0.
 
+At its start it reads the `stats.json` an earlier sampler left, so a sampler that `respawn`
+brings back loses no peak. It keeps that file's peaks, `cpu_seconds`, `oom_kills` and `samples`,
+and counts the earlier seconds at their `busy_p95_millicores`. Disk growth after the restart
+counts from the level at the restart. It starts from zero when the file is not a regular file of
+at most 4 KiB, fails the strict decoding of version 1, or holds a number above 2^40.
+
 `respawn [--root DIR]` starts the gate, the forwarder, our sshd or the sampler when its config
 exists and its process is gone. It prints `{"started":["gate"]}`.
 

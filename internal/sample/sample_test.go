@@ -6,11 +6,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -248,7 +250,7 @@ func TestSampleRunWritesUntilStopped(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		// Only the first write is periodic, so the last file shows the write at the stop
-		f.s.run(ctx, 10*time.Millisecond, time.Hour, time.Hour)
+		f.s.run(ctx, pace{read: 10 * time.Millisecond, write: time.Hour, gpu: time.Hour})
 		close(done)
 	}()
 	waitFor(t, "run wrote no stats", func() bool {
@@ -263,6 +265,120 @@ func TestSampleRunWritesUntilStopped(t *testing.T) {
 	must(t, err)
 	must(t, json.Unmarshal(b, &st))
 	eq(t, st.Samples >= 3, true)
+}
+
+// earlier is a stats file an earlier sampler of the same sandbox wrote
+const earlier = `{"v":1,"mem_peak_mib":900,"swap_peak_mib":40,"disk_peak_mib":500,` +
+	`"cpu_seconds":30,"busy_p95_millicores":1500,"gpu_mem_peak_mib":7000,"oom_kills":2,` +
+	`"samples":60,"updated_at":"2026-11-06T11:59:00Z"}` + "\n"
+
+func TestSampleKeepsTheEarlierSamplersPeaks(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t)
+	writeFile(t, f.s.out, earlier)
+	f.s.resume()
+	f.disks = map[string]disk{"/": {1, 5 << 30}}
+	f.reading(t, 0, map[string]string{
+		"meminfo": meminfo(300<<10, 0), "vmstat": "oom_kill 7\n", "stat": cpuStat(0, 0),
+	})
+	f.disks = map[string]disk{"/": {1, 5<<30 + 100<<20}}
+	// One second of two CPUs, half of it busy
+	f.reading(t, 1, map[string]string{"vmstat": "oom_kill 8\n", "stat": cpuStat(100, 100)})
+	must(t, f.s.write())
+	b, err := os.ReadFile(f.s.out)
+	must(t, err)
+	var st Stats
+	must(t, json.Unmarshal(b, &st))
+	eq(t, st, Stats{
+		V: 1, MemPeakMiB: 900, SwapPeakMiB: 40, DiskPeakMiB: 500, CPUSeconds: 31,
+		BusyP95Millicores: 1500, GPUMemPeakMiB: 7000, OOMKills: 3, Samples: 62,
+		UpdatedAt: "2026-11-06T12:00:01Z",
+	})
+
+	// Peaks past the earlier ones still count
+	f.reading(t, 2, map[string]string{"meminfo": meminfo(1000<<10, 0)})
+	eq(t, f.s.stats().MemPeakMiB, uint64(1000))
+}
+
+func TestSampleStartsFreshFromAFileItCannotTrust(t *testing.T) {
+	t.Parallel()
+	for name, write := range map[string]func(t *testing.T, path string){
+		"unknown field": func(t *testing.T, path string) {
+			writeFile(t, path, strings.Replace(earlier, `"v":1,`, `"v":1,"x":1,`, 1))
+		},
+		"version": func(t *testing.T, path string) {
+			writeFile(t, path, strings.Replace(earlier, `"v":1,`, `"v":2,`, 1))
+		},
+		"data after": func(t *testing.T, path string) { writeFile(t, path, earlier+"{}") },
+		"too large": func(t *testing.T, path string) {
+			writeFile(t, path, earlier+strings.Repeat(" ", 8192))
+		},
+		"past its bounds": func(t *testing.T, path string) {
+			writeFile(t, path, strings.Replace(earlier, `"mem_peak_mib":900`,
+				`"mem_peak_mib":18446744073709551615`, 1))
+		},
+		"symlink": func(t *testing.T, path string) {
+			target := filepath.Join(t.TempDir(), "elsewhere.json")
+			writeFile(t, target, earlier)
+			must(t, os.Symlink(target, path))
+		},
+		// A FIFO with no writer would block a plain read forever
+		"fifo": func(t *testing.T, path string) { must(t, syscall.Mkfifo(path, 0o644)) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			f := newFixture(t)
+			write(t, f.s.out)
+			done := make(chan struct{})
+			go func() {
+				f.s.resume()
+				close(done)
+			}()
+			select {
+			case <-done:
+			case <-time.After(5 * time.Second):
+				t.Fatal("resume blocked")
+			}
+			eq(t, f.s.stats().Samples, uint64(0))
+			eq(t, f.s.stats().MemPeakMiB, uint64(0))
+		})
+	}
+}
+
+// served runs serve under a fresh root at a fast pace, with stats as an earlier sampler's file
+func served(t *testing.T, stats string) (string, <-chan int, context.CancelFunc) {
+	t.Helper()
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "etc", "bugnet", "sample.json"), `{"v":1}`)
+	must(t, os.MkdirAll(filepath.Join(root, "tmp", "bugnet"), 0o755))
+	if stats != "" {
+		writeFile(t, filepath.Join(root, "tmp", "bugnet", "stats.json"), stats)
+	}
+	proc := t.TempDir()
+	writeFile(t, filepath.Join(proc, "meminfo"), meminfo(300<<10, 0))
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	done := make(chan int, 1)
+	go func() {
+		p := pace{read: 10 * time.Millisecond, write: 30 * time.Millisecond, gpu: time.Hour}
+		done <- serve(ctx, []string{"--root", root}, io.Discard, proc, p)
+	}()
+	return root, done, cancel
+}
+
+func TestSampleServeCarriesTheEarlierPeaks(t *testing.T) {
+	t.Parallel()
+	root, done, stop := served(t, earlier)
+	out := filepath.Join(root, "tmp", "bugnet", "stats.json")
+	var st Stats
+	waitFor(t, "serve wrote nothing past the earlier stats", func() bool {
+		b, err := os.ReadFile(out)
+		return err == nil && json.Unmarshal(b, &st) == nil && st.Samples > 61
+	})
+	eq(t, st.MemPeakMiB, uint64(900))
+	eq(t, st.CPUSeconds >= 30, true)
+	stop()
+	eq(t, <-done, 0)
 }
 
 func TestConfigIsStrict(t *testing.T) {
