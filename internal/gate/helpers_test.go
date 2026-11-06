@@ -56,8 +56,8 @@ type testGate struct {
 	gate *Gate
 }
 
-// startGate serves a gate on a free loopback port with the production deny list
-func startGate(t *testing.T) *testGate {
+// startGate serves a gate on a free loopback port with the production deny list, tuned first
+func startGate(t *testing.T, tune ...func(*Gate)) *testGate {
 	t.Helper()
 	root, err := sandbox.NewRoot(t.TempDir())
 	must(t, err)
@@ -67,6 +67,9 @@ func startGate(t *testing.T) *testGate {
 		SSHPortFile: sandbox.SSHPortFile,
 	}, root)
 	must(t, err)
+	for _, f := range tune {
+		f(g)
+	}
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	must(t, err)
 	ctx, cancel := context.WithCancel(context.Background())

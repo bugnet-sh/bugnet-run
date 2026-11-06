@@ -151,6 +151,9 @@ type Gate struct {
 	proxy       *httputil.ReverseProxy
 	slots       chan struct{}
 	tunnels     chan struct{}
+	// headerTimeout and idleTimeout bound only silent connections, so tests may shorten them
+	headerTimeout time.Duration
+	idleTimeout   time.Duration
 }
 
 type portKey struct{}
@@ -168,6 +171,7 @@ func New(cfg Config, root sandbox.Root) (*Gate, error) {
 	g := &Gate{
 		key: []byte(key), deny: map[int]bool{}, root: root, sshPortFile: cfg.SSHPortFile,
 		slots: make(chan struct{}, MaxInFlight), tunnels: make(chan struct{}, MaxTunnels),
+		headerTimeout: headerTimeout, idleTimeout: idleTimeout,
 	}
 	for _, p := range cfg.Deny {
 		g.deny[p] = true
@@ -204,7 +208,7 @@ func (g *Gate) Serve(ctx context.Context, ln net.Listener) error {
 	}
 	// Header and idle limits only bound silent connections, never a request in progress
 	srv := &http.Server{
-		Handler: g, ReadHeaderTimeout: headerTimeout, IdleTimeout: idleTimeout,
+		Handler: g, ReadHeaderTimeout: g.headerTimeout, IdleTimeout: g.idleTimeout,
 		ErrorLog: log.New(io.Discard, "", 0),
 	}
 	stop := context.AfterFunc(ctx, func() { _ = srv.Close() })

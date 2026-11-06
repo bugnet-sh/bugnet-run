@@ -114,7 +114,9 @@ gate files the last setup wrote.
 
 `gate --config /etc/bugnet/gate.json [--root DIR]` is the reverse proxy on `:29417`. Every
 response carries `Bugnet-Gate-Response: 1`. A missing or wrong `Bugnet-Gate` key gets a bare
-404.
+404. A connection that sends no whole request header within 1 min is closed, and so is one that
+sends nothing for 10 min after an answer. Neither limit cuts a request, an answer or an open
+WebSocket short.
 
 | Request | Answer |
 |---|---|

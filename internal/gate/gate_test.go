@@ -1,6 +1,7 @@
 package gate
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"crypto/rand"
@@ -229,6 +230,83 @@ func TestGateControlRoutes(t *testing.T) {
 	must(t, err)
 	_ = res.Body.Close()
 	eq(t, res.StatusCode, 404)
+}
+
+// The gate's limits bound silent connections alone, never a request, an answer or a WebSocket
+func TestGateTimeoutsBoundOnlySilentConnections(t *testing.T) {
+	t.Parallel()
+	pinned := startGate(t).gate
+	eq(t, []time.Duration{pinned.headerTimeout, pinned.idleTimeout},
+		[]time.Duration{time.Minute, 10 * time.Minute})
+
+	const limit = 300 * time.Millisecond
+	g := startGate(t, func(g *Gate) { g.headerTimeout, g.idleTimeout = limit, limit })
+	for _, sent := range []string{"", "GET / HTTP/1.1\r\nHost: x\r\n"} {
+		c, err := net.Dial("tcp", g.addr)
+		must(t, err)
+		t.Cleanup(func() { _ = c.Close() })
+		_, err = io.WriteString(c, sent)
+		must(t, err)
+		began := time.Now()
+		must(t, c.SetReadDeadline(began.Add(10*time.Second)))
+		n, err := c.Read(make([]byte, 1))
+		took := time.Since(began)
+		eq(t, n, 0)
+		eq(t, errors.Is(err, io.EOF), true)
+		if took < limit-50*time.Millisecond || took > 5*time.Second {
+			t.Errorf("a connection that sent %q was closed after %v, want about %v", sent, took,
+				limit)
+		}
+	}
+
+	// A kept-alive connection that sends nothing after its answer is closed once idle
+	c, err := net.Dial("tcp", g.addr)
+	must(t, err)
+	t.Cleanup(func() { _ = c.Close() })
+	_, err = io.WriteString(c, "GET "+PathHealth+" HTTP/1.1\r\nHost: x\r\n"+HeaderKey+": "+
+		testKey+"\r\n\r\n")
+	must(t, err)
+	must(t, c.SetReadDeadline(time.Now().Add(10*time.Second)))
+	cr := bufio.NewReader(c)
+	health, err := http.ReadResponse(cr, nil)
+	must(t, err)
+	eq(t, health.StatusCode, 204)
+	began := time.Now()
+	_, err = cr.ReadByte()
+	eq(t, errors.Is(err, io.EOF), true)
+	if took := time.Since(began); took < limit-50*time.Millisecond || took > 5*time.Second {
+		t.Errorf("an idle connection was closed after %v, want about %v", took, limit)
+	}
+
+	res, conn, br := upgrade(t, g, "/socket", app(echoApp(t, "chat")), "chat")
+	eq(t, res.StatusCode, 101)
+	ws := wsframe.NewConn(conn, br, true)
+	time.Sleep(3 * limit)
+	_, err = ws.Write([]byte("still open"))
+	must(t, err)
+	got := make([]byte, len("still open"))
+	must(t, conn.SetReadDeadline(time.Now().Add(5*time.Second)))
+	_, err = io.ReadFull(ws, got)
+	must(t, err)
+	eq(t, string(got), "still open")
+
+	sshd := sshdAt(t, g)
+	res, conn, br = upgrade(t, g, PathSSH, keyed(), ProtocolSSH)
+	eq(t, res.StatusCode, 101)
+	up := <-sshd.conns
+	time.Sleep(3 * limit)
+	go func() { _, _ = wsframe.NewConn(conn, br, true).Write([]byte("late keys")) }()
+	got = make([]byte, len("late keys"))
+	must(t, up.SetReadDeadline(time.Now().Add(5*time.Second)))
+	_, err = io.ReadFull(up, got)
+	must(t, err)
+	eq(t, string(got), "late keys")
+
+	slow := serve(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		time.Sleep(3 * limit)
+		_, _ = io.WriteString(w, "worth the wait")
+	}))
+	eq(t, gateGet(t, g, "/", app(slow)).Body, "worth the wait")
 }
 
 func TestGateSSHPathCopiesBytes(t *testing.T) {
