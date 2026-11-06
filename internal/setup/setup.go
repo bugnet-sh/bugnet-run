@@ -164,7 +164,11 @@ func run(ctx context.Context, args []string, stderr io.Writer) (Result, error) {
 			return Result{}, fail(ErrGateFailed, err)
 		}
 	}
-	sup := sandbox.Supervisor{Root: root, Exe: exe, Systemctl: systemctl}
+	// Units start from the copy, so a /tmp emptied at boot never takes their binary away
+	if _, err := sandbox.InstallRunner(root, exe); err != nil {
+		return Result{}, fail(ErrGateFailed, err)
+	}
+	sup := sandbox.Supervisor{Root: root, Systemctl: systemctl}
 	if err := startGate(ctx, sup, cfg, key, changed); err != nil {
 		return Result{}, fail(ErrGateFailed, err)
 	}

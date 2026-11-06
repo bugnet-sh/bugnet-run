@@ -22,6 +22,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -99,16 +100,36 @@ type fixture struct {
 	root sandbox.Root
 	port int
 	dir  string
+	// ended holds the pids this test ended, which its cleanup never signals again
+	ended map[int]bool
 }
 
-// newFixture gives a test its own sandbox root and gate port, stopping its gates at the end
+// newFixture gives a test a root whose runner is binPath itself, so no copy pays macOS's check
 func newFixture(t *testing.T) *fixture {
+	t.Helper()
+	f := freshFixture(t)
+	dst := f.root.Path(sandbox.RunnerPath)
+	must(t, os.MkdirAll(filepath.Dir(dst), 0o755))
+	must(t, os.Link(binPath, dst))
+	return f
+}
+
+// freshFixture gives a test its own sandbox root and gate port, stopping its gates at the end
+func freshFixture(t *testing.T) *fixture {
 	t.Helper()
 	root, err := sandbox.NewRoot(t.TempDir())
 	must(t, err)
-	f := &fixture{root: root, port: freePort(t), dir: t.TempDir()}
+	f := &fixture{root: root, port: freePort(t), dir: t.TempDir(), ended: map[int]bool{}}
 	t.Cleanup(func() { f.stopGate(t) })
 	return f
+}
+
+// slowStart gives the gate long enough to start from a new copy, which macOS checks first
+func slowStart(t *testing.T) {
+	t.Helper()
+	before := healthWait
+	healthWait = 30 * time.Second
+	t.Cleanup(func() { healthWait = before })
 }
 
 func freePort(t *testing.T) int {
@@ -160,6 +181,14 @@ func (f *fixture) run(t *testing.T, spec any, extra ...string) (string, int) {
 	return strings.TrimSpace(out.String()), code
 }
 
+// command is the command line ps shows for pid
+func command(t *testing.T, pid int) string {
+	t.Helper()
+	out, err := exec.Command("ps", "-o", "command=", "-p", strconv.Itoa(pid)).Output()
+	must(t, err)
+	return strings.TrimSpace(string(out))
+}
+
 func (f *fixture) gatePid(t *testing.T) int {
 	t.Helper()
 	pid, err := sandbox.ReadPidFile(f.root, "gate")
@@ -173,17 +202,24 @@ func (f *fixture) healthy(key string) error {
 	return gate.Healthy(ctx, fmt.Sprintf("127.0.0.1:%d", f.port), key)
 }
 
-// stopGate ends the gate and the sampler this fixture's setup started, processes the test owns
+// stopGate ends the gate and the sampler this fixture's setup started, never a pid it ended
 func (f *fixture) stopGate(t *testing.T) {
 	t.Helper()
 	for _, name := range []string{"gate", "sample"} {
 		pid, err := sandbox.ReadPidFile(f.root, name)
-		if err != nil || !alive(pid) {
+		if err != nil || f.ended[pid] || !alive(pid) {
 			continue
 		}
-		_ = syscall.Kill(pid, syscall.SIGTERM)
-		waitGone(t, pid)
+		f.kill(t, pid, syscall.SIGTERM)
 	}
+}
+
+// kill sends sig to a process this test started, remembers it and waits until it is gone
+func (f *fixture) kill(t *testing.T, pid int, sig syscall.Signal) {
+	t.Helper()
+	f.ended[pid] = true
+	_ = syscall.Kill(pid, sig)
+	waitGone(t, pid)
 }
 
 func waitGone(t *testing.T, pid int) {
@@ -261,15 +297,15 @@ func (c *caTool) count() int {
 
 type fakeSystemd struct {
 	t     *testing.T
-	root  sandbox.Root
+	fix   *fixture
 	mu    sync.Mutex
 	calls []string
 }
 
 // fakeSystemctl runs a unit's ExecStart in its own session, as systemd would for start
-func fakeSystemctl(t *testing.T, root sandbox.Root) *fakeSystemd {
+func fakeSystemctl(t *testing.T, fix *fixture) *fakeSystemd {
 	t.Helper()
-	f := &fakeSystemd{t: t, root: root}
+	f := &fakeSystemd{t: t, fix: fix}
 	systemctl = f.run
 	t.Cleanup(func() { systemctl = nil })
 	return f
@@ -279,18 +315,21 @@ func (f *fakeSystemd) run(_ context.Context, args ...string) error {
 	f.mu.Lock()
 	f.calls = append(f.calls, strings.Join(args, " "))
 	f.mu.Unlock()
+	if !exists(f.fix.root.Path(sandbox.RunnerPath)) {
+		f.t.Errorf("systemctl %s ran before the runner was copied", strings.Join(args, " "))
+	}
 	if len(args) != 2 || args[0] != "start" && args[0] != "restart" {
 		return nil
 	}
 	name := strings.TrimSuffix(strings.TrimPrefix(args[1], "bugnet-"), ".service")
-	if pid, err := sandbox.ReadPidFile(f.root, name); err == nil && alive(pid) {
+	if pid, err := sandbox.ReadPidFile(f.fix.root, name); err == nil && !f.fix.ended[pid] &&
+		alive(pid) {
 		if args[0] == "start" {
 			return nil
 		}
-		_ = syscall.Kill(pid, syscall.SIGTERM)
-		waitGone(f.t, pid)
+		f.fix.kill(f.t, pid, syscall.SIGTERM)
 	}
-	unit, err := os.Open(f.root.Path(sandbox.UnitDir + "/" + args[1]))
+	unit, err := os.Open(f.fix.root.Path(sandbox.UnitDir + "/" + args[1]))
 	if err != nil {
 		return err
 	}

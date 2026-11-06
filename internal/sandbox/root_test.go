@@ -21,6 +21,8 @@ func TestRootMapsPaths(t *testing.T) {
 	eq(t, r.Dir(), "/sandboxes/a/fs")
 	eq(t, r.Path(GateKeyFile), "/sandboxes/a/fs/etc/bugnet/gate.key")
 	eq(t, r.Path(RunDir), "/sandboxes/a/fs/run/bugnet")
+	eq(t, sys.Path(RunnerPath), "/usr/local/lib/bugnet/bugnet-run")
+	eq(t, r.Path(RunnerPath), "/sandboxes/a/fs/usr/local/lib/bugnet/bugnet-run")
 	eq(t, r.Args(), []string{"--root", "/sandboxes/a/fs"})
 
 	_, err = NewRoot("relative/fs")

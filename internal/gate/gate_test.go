@@ -35,6 +35,7 @@ func TestWireNames(t *testing.T) {
 	})
 	eq(t, DefaultPort, 29417)
 	eq(t, []int{MaxInFlight, MaxTunnels}, []int{256, 16})
+	eq(t, sandbox.RunnerPath, "/usr/local/lib/bugnet/bugnet-run")
 }
 
 func TestGateMissingOrWrongKeyIs404(t *testing.T) {

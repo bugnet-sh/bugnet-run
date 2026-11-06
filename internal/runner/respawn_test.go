@@ -11,7 +11,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
-	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -24,13 +23,56 @@ import (
 
 var gateKey = base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{5}, 32))
 
-// setupGate runs setup under a fresh root and stops the gate it leaves running at the end
-func setupGate(t *testing.T) (sandbox.Root, string) {
+// services stops a root's services at the end of a test, never a pid the test already ended
+type services struct {
+	root  sandbox.Root
+	ended map[int]bool
+}
+
+// newRoot gives a test a root whose runner is binPath, stopping the named services at the end
+func newRoot(t *testing.T, names ...string) *services {
 	t.Helper()
 	root, err := sandbox.NewRoot(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
+	linkRunner(t, root, binPath)
+	s := &services{root: root, ended: map[int]bool{}}
+	t.Cleanup(func() {
+		for _, name := range names {
+			if pid, err := sandbox.ReadPidFile(root, name); err == nil && !s.ended[pid] {
+				s.end(t, pid, syscall.SIGTERM)
+			}
+		}
+	})
+	return s
+}
+
+// end sends sig to a process the test started, remembers it and waits until it is gone
+func (s *services) end(t *testing.T, pid int, sig syscall.Signal) {
+	t.Helper()
+	s.ended[pid] = true
+	_ = syscall.Kill(pid, sig)
+	waitFor(t, 5*time.Second, func() bool { return gone(pid) })
+}
+
+// linkRunner makes bin the root's runner, so no new copy pays macOS's check of a new binary
+func linkRunner(t *testing.T, root sandbox.Root, bin string) {
+	t.Helper()
+	runner := root.Path(sandbox.RunnerPath)
+	if err := os.MkdirAll(filepath.Dir(runner), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Link(bin, runner); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// setupGate runs setup under a fresh root and stops the gate it leaves running at the end
+func setupGate(t *testing.T) (*services, string) {
+	t.Helper()
+	s := newRoot(t, "gate")
+	root := s.root
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -47,23 +89,12 @@ func setupGate(t *testing.T) (sandbox.Root, string) {
 	if err := os.WriteFile(specPath, spec, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { stopGate(t, root) })
 	out := runRaw(t, "setup", "--spec", specPath, "--root", root.Dir())
 	if got := strings.TrimSpace(string(out)); got !=
 		`{"gate":"listening","ca":"skipped","init":"setsid"}` {
 		t.Fatalf("setup printed %s", got)
 	}
-	return root, addr
-}
-
-func stopGate(t *testing.T, root sandbox.Root) {
-	t.Helper()
-	pid, err := sandbox.ReadPidFile(root, "gate")
-	if err != nil {
-		return
-	}
-	_ = syscall.Kill(pid, syscall.SIGTERM)
-	waitFor(t, 5*time.Second, func() bool { return gone(pid) })
+	return s, addr
 }
 
 func healthy(addr string) bool {
@@ -74,15 +105,13 @@ func healthy(addr string) bool {
 
 func TestStartRespawnsDeadGate(t *testing.T) {
 	t.Parallel()
-	root, addr := setupGate(t)
+	s, addr := setupGate(t)
+	root := s.root
 	pid, err := sandbox.ReadPidFile(root, "gate")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := syscall.Kill(pid, syscall.SIGKILL); err != nil {
-		t.Fatal(err)
-	}
-	waitFor(t, 5*time.Second, func() bool { return gone(pid) })
+	s.end(t, pid, syscall.SIGKILL)
 	if healthy(addr) {
 		t.Fatal("the gate still answers after SIGKILL")
 	}
@@ -107,17 +136,15 @@ func TestRespawnCommand(t *testing.T) {
 	empty := t.TempDir()
 	eq(t, strings.TrimSpace(string(runRaw(t, "respawn", "--root", empty))), `{"started":[]}`)
 
-	root, addr := setupGate(t)
+	s, addr := setupGate(t)
+	root := s.root
 	eq(t, strings.TrimSpace(string(runRaw(t, "respawn", "--root", root.Dir()))),
 		`{"started":[]}`)
 	pid, err := sandbox.ReadPidFile(root, "gate")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := syscall.Kill(pid, syscall.SIGKILL); err != nil {
-		t.Fatal(err)
-	}
-	waitFor(t, 5*time.Second, func() bool { return gone(pid) })
+	s.end(t, pid, syscall.SIGKILL)
 	eq(t, strings.TrimSpace(string(runRaw(t, "respawn", "--root", root.Dir()))),
 		`{"started":["gate"]}`)
 	waitFor(t, 5*time.Second, func() bool { return healthy(addr) })
@@ -125,15 +152,13 @@ func TestRespawnCommand(t *testing.T) {
 
 func TestRespawnSkipsWhileSetupHoldsTheLock(t *testing.T) {
 	t.Parallel()
-	root, addr := setupGate(t)
+	s, addr := setupGate(t)
+	root := s.root
 	pid, err := sandbox.ReadPidFile(root, "gate")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := syscall.Kill(pid, syscall.SIGKILL); err != nil {
-		t.Fatal(err)
-	}
-	waitFor(t, 5*time.Second, func() bool { return gone(pid) })
+	s.end(t, pid, syscall.SIGKILL)
 
 	unlock, err := sandbox.Lock(root)
 	if err != nil {
@@ -182,10 +207,9 @@ func TestGateAndSetupBadArgs(t *testing.T) {
 
 func TestRespawnBringsBackTheForwarder(t *testing.T) {
 	t.Parallel()
-	root, err := sandbox.NewRoot(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
+	s := newRoot(t, "forward")
+	root := s.root
+	var err error
 	token := "bnt_" + base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{6}, 32))
 	cfg := `{"endpoint":"egress.example","ips":["127.0.0.1"],"port":443,` +
 		`"listen":"127.0.0.1:0","token_file":"/etc/bugnet/egress.token","hosts":[],` +
@@ -200,12 +224,6 @@ func TestRespawnBringsBackTheForwarder(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	t.Cleanup(func() {
-		if pid, err := sandbox.ReadPidFile(root, "forward"); err == nil {
-			_ = syscall.Kill(pid, syscall.SIGTERM)
-			waitFor(t, 5*time.Second, func() bool { return gone(pid) })
-		}
-	})
 	forwarder := func() int {
 		var pid int
 		waitFor(t, 5*time.Second, func() bool {
@@ -218,10 +236,7 @@ func TestRespawnBringsBackTheForwarder(t *testing.T) {
 	eq(t, strings.TrimSpace(string(runRaw(t, "respawn", "--root", root.Dir()))),
 		`{"started":["forward"]}`)
 	pid := forwarder()
-	if err := syscall.Kill(pid, syscall.SIGKILL); err != nil {
-		t.Fatal(err)
-	}
-	waitFor(t, 5*time.Second, func() bool { return gone(pid) })
+	s.end(t, pid, syscall.SIGKILL)
 	startJob(t, t.TempDir(), "after", nil, "--root", root.Dir(), "--", "true").collect(t, 0, 0).
 		mustExit(t)
 	if again := forwarder(); again == pid {
@@ -268,10 +283,8 @@ func buildFakeSSHD(t *testing.T) string {
 func TestRespawnBringsBackSshdAfterRunWiped(t *testing.T) {
 	t.Parallel()
 	fake := buildFakeSSHD(t)
-	root, err := sandbox.NewRoot(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
+	s := newRoot(t, "sshd")
+	root := s.root
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -285,12 +298,6 @@ func TestRespawnBringsBackSshdAfterRunWiped(t *testing.T) {
 	if err := os.WriteFile(specPath, []byte(spec), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() {
-		if pid, err := sandbox.ReadPidFile(root, "sshd"); err == nil {
-			_ = syscall.Kill(pid, syscall.SIGTERM)
-			waitFor(t, 5*time.Second, func() bool { return gone(pid) })
-		}
-	})
 	var res struct {
 		Port    int    `json:"port"`
 		HostKey string `json:"host_key"`
@@ -311,10 +318,7 @@ func TestRespawnBringsBackSshdAfterRunWiped(t *testing.T) {
 	}
 	pid := sshd()
 
-	if err := syscall.Kill(pid, syscall.SIGKILL); err != nil {
-		t.Fatal(err)
-	}
-	waitFor(t, 5*time.Second, func() bool { return gone(pid) })
+	s.end(t, pid, syscall.SIGKILL)
 	if err := os.RemoveAll(root.Path("/run")); err != nil {
 		t.Fatal(err)
 	}
@@ -326,10 +330,7 @@ func TestRespawnBringsBackSshdAfterRunWiped(t *testing.T) {
 		t.Fatalf("respawn left sshd without its run directory: %v", err)
 	}
 
-	if err := syscall.Kill(again, syscall.SIGKILL); err != nil {
-		t.Fatal(err)
-	}
-	waitFor(t, 5*time.Second, func() bool { return gone(again) })
+	s.end(t, again, syscall.SIGKILL)
 	startJob(t, t.TempDir(), "after", nil, "--root", root.Dir(), "--", "true").collect(t, 0, 0).
 		mustExit(t)
 	if third := sshd(); third == again {
@@ -453,9 +454,9 @@ func TestStartReloadsAMissingFirewallOnceAMinute(t *testing.T) {
 
 func TestRespawnWithoutRulesNeverRunsNft(t *testing.T) {
 	t.Parallel()
-	root, _ := setupGate(t)
+	s, _ := setupGate(t)
 	path, calls := fakeNft(t)
-	startJob(t, t.TempDir(), "job", []string{path}, "--root", root.Dir(), "--", "true").
+	startJob(t, t.TempDir(), "job", []string{path}, "--root", s.root.Dir(), "--", "true").
 		collect(t, 0, 0).mustExit(t)
 	sameAs(t, calls(), []string(nil))
 }
@@ -469,10 +470,9 @@ func sameAs[T any](t *testing.T, got, want T) {
 
 func TestRespawnStartsDeadSampler(t *testing.T) {
 	t.Parallel()
-	root, err := sandbox.NewRoot(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
+	s := newRoot(t, "sample")
+	root := s.root
+	var err error
 	config := root.Path(sandbox.SampleConfig)
 	if err := os.MkdirAll(filepath.Dir(config), 0o755); err != nil {
 		t.Fatal(err)
@@ -484,14 +484,6 @@ func TestRespawnStartsDeadSampler(t *testing.T) {
 	if err := os.MkdirAll(root.Path("/tmp/bugnet"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	var stopped []int
-	t.Cleanup(func() {
-		if pid, err := sandbox.ReadPidFile(root, "sample"); err == nil &&
-			!slices.Contains(stopped, pid) {
-			_ = syscall.Kill(pid, syscall.SIGTERM)
-			waitFor(t, 5*time.Second, func() bool { return gone(pid) })
-		}
-	})
 	sampler := func() int {
 		var pid int
 		waitFor(t, 5*time.Second, func() bool {
@@ -508,11 +500,7 @@ func TestRespawnStartsDeadSampler(t *testing.T) {
 	eq(t, strings.TrimSpace(string(runRaw(t, "respawn", "--root", root.Dir()))),
 		`{"started":[]}`)
 
-	if err := syscall.Kill(pid, syscall.SIGKILL); err != nil {
-		t.Fatal(err)
-	}
-	stopped = append(stopped, pid)
-	waitFor(t, 5*time.Second, func() bool { return gone(pid) })
+	s.end(t, pid, syscall.SIGKILL)
 	startJob(t, t.TempDir(), "after", nil, "--root", root.Dir(), "--", "true").collect(t, 0, 0).
 		mustExit(t)
 	if again := sampler(); again == pid {

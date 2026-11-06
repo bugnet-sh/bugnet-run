@@ -92,8 +92,7 @@ func TestSetupRepairRerunsOnlyGate(t *testing.T) {
 	writeFile(t, f.root.Path(sandbox.EnvFile), "HAND=1\n")
 	must(t, os.Remove(f.root.Path(sandbox.CABundle)))
 	pid := f.gatePid(t)
-	must(t, syscall.Kill(pid, syscall.SIGKILL))
-	waitGone(t, pid)
+	f.kill(t, pid, syscall.SIGKILL)
 
 	out, code := f.run(t, s, "--repair")
 	eq(t, out, `{"gate":"listening","init":"setsid"}`)
@@ -105,8 +104,7 @@ func TestSetupRepairRerunsOnlyGate(t *testing.T) {
 	eq(t, tool.count(), 1)
 
 	pid = f.gatePid(t)
-	must(t, syscall.Kill(pid, syscall.SIGKILL))
-	waitGone(t, pid)
+	f.kill(t, pid, syscall.SIGKILL)
 	out, code = f.run(t, nil, "--repair")
 	eq(t, out, `{"gate":"listening","init":"setsid"}`)
 	eq(t, code, 0)
@@ -305,7 +303,7 @@ func TestSetupWriteFailureIsGateFailed(t *testing.T) {
 func TestSetupUnderSystemd(t *testing.T) {
 	f := newFixture(t)
 	must(t, os.MkdirAll(f.root.Path(sandbox.SystemdDir), 0o755))
-	fake := fakeSystemctl(t, f.root)
+	fake := fakeSystemctl(t, f)
 	out, code := f.run(t, f.spec())
 	eq(t, out, `{"gate":"listening","ca":"skipped","init":"systemd"}`)
 	eq(t, code, 0)
@@ -315,8 +313,8 @@ func TestSetupUnderSystemd(t *testing.T) {
 	})
 	unit := readFile(t, f.root.Path(sandbox.UnitDir+"/bugnet-gate.service"))
 	for _, line := range []string{
-		"ExecStart=" + binPath + " gate --config " + f.root.Path(sandbox.GateConfig) +
-			" --root " + f.root.Dir(),
+		"ExecStart=" + f.root.Path(sandbox.RunnerPath) + " gate --config " +
+			f.root.Path(sandbox.GateConfig) + " --root " + f.root.Dir(),
 		"Restart=always", "RuntimeDirectory=bugnet", "RuntimeDirectoryPreserve=yes",
 		"WantedBy=multi-user.target",
 	} {
@@ -331,6 +329,77 @@ func TestSetupUnderSystemd(t *testing.T) {
 	eq(t, out, `{"gate":"listening","ca":"skipped","init":"systemd"}`)
 	eq(t, fake.take(), []string(nil))
 	eq(t, f.gatePid(t), pid)
+}
+
+func TestSetupCopiesTheRunnerBeforeAnyUnit(t *testing.T) {
+	slowStart(t)
+	f := freshFixture(t)
+	must(t, os.MkdirAll(f.root.Path(sandbox.SystemdDir), 0o755))
+	fake := fakeSystemctl(t, f)
+	out, code := f.run(t, f.spec())
+	eq(t, out, `{"gate":"listening","ca":"skipped","init":"systemd"}`)
+	eq(t, code, 0)
+	eq(t, len(fake.take()), 4)
+	runner := f.root.Path(sandbox.RunnerPath)
+	info, err := os.Stat(runner)
+	must(t, err)
+	eq(t, info.Mode().Perm(), os.FileMode(0o755))
+	built, err := os.Stat(binPath)
+	must(t, err)
+	eq(t, os.SameFile(info, built), false)
+	eq(t, sameContent(t, runner, binPath), true)
+	unit := readFile(t, f.root.Path(sandbox.UnitDir+"/bugnet-gate.service"))
+	eq(t, strings.Contains(unit, "\nExecStart="+runner+" gate "), true)
+	eq(t, strings.HasPrefix(command(t, f.gatePid(t)), runner+" gate --config "), true)
+
+	// A second setup with the same binary leaves the copy as it was
+	must(t, f.healthy(testKey))
+	out, code = f.run(t, f.spec())
+	eq(t, out, `{"gate":"listening","ca":"skipped","init":"systemd"}`)
+	eq(t, code, 0)
+	again, err := os.Stat(runner)
+	must(t, err)
+	eq(t, os.SameFile(again, info) && again.ModTime().Equal(info.ModTime()), true)
+	eq(t, leftovers(t, filepath.Dir(runner)), []string{"bugnet-run"})
+}
+
+func TestSetupReplacesAnOlderRunner(t *testing.T) {
+	slowStart(t)
+	f := freshFixture(t)
+	runner := f.root.Path(sandbox.RunnerPath)
+	writeFile(t, runner, "#!/bin/sh\nexit 1\n")
+	must(t, os.Chmod(runner, 0o755))
+	// The gate an older setup started still runs from the older file, which a rename keeps
+	held := filepath.Join(t.TempDir(), "held")
+	must(t, os.Link(runner, held))
+
+	out, code := f.run(t, f.spec())
+	eq(t, out, `{"gate":"listening","ca":"skipped","init":"setsid"}`)
+	eq(t, code, 0)
+	eq(t, sameContent(t, runner, binPath), true)
+	eq(t, readFile(t, held), "#!/bin/sh\nexit 1\n")
+	eq(t, leftovers(t, filepath.Dir(runner)), []string{"bugnet-run"})
+	eq(t, strings.HasPrefix(command(t, f.gatePid(t)), runner+" gate --config "), true)
+}
+
+func sameContent(t *testing.T, a, b string) bool {
+	t.Helper()
+	x, err := os.ReadFile(a)
+	must(t, err)
+	y, err := os.ReadFile(b)
+	must(t, err)
+	return bytes.Equal(x, y)
+}
+
+func leftovers(t *testing.T, dir string) []string {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	must(t, err)
+	var names []string
+	for _, e := range entries {
+		names = append(names, e.Name())
+	}
+	return names
 }
 
 func TestSetupWaitsForTheSandboxLock(t *testing.T) {
@@ -420,15 +489,14 @@ func TestSetupThenRespawnRunsOneSampler(t *testing.T) {
 	f := newFixture(t)
 	t.Cleanup(func() {
 		for _, pid := range f.samplers(t) {
-			_ = syscall.Kill(pid, syscall.SIGTERM)
-			waitGone(t, pid)
+			f.kill(t, pid, syscall.SIGTERM)
 		}
 	})
 	s := f.spec()
 	s.Sample = true
 	_, code := f.run(t, s)
 	eq(t, code, 0)
-	must(t, sandbox.Supervisor{Root: f.root, Exe: binPath}.Start(t.Context(), sandbox.Sample))
+	must(t, sandbox.Supervisor{Root: f.root}.Start(t.Context(), sandbox.Sample))
 	pid := f.samplerPid(t)
 	deadline := time.Now().Add(3 * time.Second)
 	for running := f.samplers(t); len(running) != 1; running = f.samplers(t) {
@@ -471,7 +539,7 @@ func TestSetupWithoutSampleStartsNone(t *testing.T) {
 func TestSetupSamplerUnderSystemd(t *testing.T) {
 	f := newFixture(t)
 	must(t, os.MkdirAll(f.root.Path(sandbox.SystemdDir), 0o755))
-	fake := fakeSystemctl(t, f.root)
+	fake := fakeSystemctl(t, f)
 	s := f.spec()
 	s.Sample = true
 	_, code := f.run(t, s)
@@ -482,8 +550,8 @@ func TestSetupSamplerUnderSystemd(t *testing.T) {
 		"reset-failed bugnet-sample.service", "start bugnet-sample.service",
 	})
 	unit := readFile(t, f.root.Path(sandbox.UnitDir+"/bugnet-sample.service"))
-	want := "ExecStart=" + binPath + " sample --config " + f.root.Path(sandbox.SampleConfig) +
-		" --root " + f.root.Dir() + "\n"
+	want := "ExecStart=" + f.root.Path(sandbox.RunnerPath) + " sample --config " +
+		f.root.Path(sandbox.SampleConfig) + " --root " + f.root.Dir() + "\n"
 	eq(t, strings.Contains(unit, want), true)
 	f.samplerPid(t)
 }

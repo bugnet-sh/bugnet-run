@@ -94,6 +94,14 @@ func newSudoSandbox(t *testing.T) *sudoSandbox {
 		exe: exe, root: root, addr: ln.Addr().String(), jobs: t.TempDir(), killed: map[int]bool{},
 	}
 	_ = ln.Close()
+	// The test binary itself as the runner, so no new copy pays macOS's check of a new binary
+	runner := root.Path(sandbox.RunnerPath)
+	if err := os.MkdirAll(filepath.Dir(runner), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Link(exe, runner); err != nil {
+		t.Fatal(err)
+	}
 	spec, err := json.Marshal(map[string]any{
 		"v": 1, "gate_key": sudoGateKey, "gate_listen": s.addr, "deny_ports": []int{22},
 	})

@@ -17,7 +17,7 @@ import (
 func TestInitDetectsSystemd(t *testing.T) {
 	t.Parallel()
 	r := testRoot(t)
-	s := Supervisor{Root: r, Exe: "/tmp/bugnet/bin/bugnet-run"}
+	s := Supervisor{Root: r}
 	eq(t, s.Init(), InitSetsid)
 	must(t, os.MkdirAll(r.Path(SystemdDir), 0o755))
 	eq(t, s.Init(), InitSystemd)
@@ -25,10 +25,10 @@ func TestInitDetectsSystemd(t *testing.T) {
 
 func TestUnitText(t *testing.T) {
 	t.Parallel()
-	s := Supervisor{Root: System, Exe: "/tmp/bugnet/bin/bugnet-run"}
+	s := Supervisor{Root: System}
 	eq(t, s.unit(Gate), "[Unit]\nDescription=Bugnet gate\nAfter=network.target\n"+
 		"StartLimitIntervalSec=60\nStartLimitBurst=10\n\n[Service]\n"+
-		"ExecStart=/tmp/bugnet/bin/bugnet-run gate --config /etc/bugnet/gate.json\n"+
+		"ExecStart=/usr/local/lib/bugnet/bugnet-run gate --config /etc/bugnet/gate.json\n"+
 		"Restart=always\nRestartSec=1\nRuntimeDirectory=bugnet\nRuntimeDirectoryPreserve=yes\n\n"+
 		"[Install]\nWantedBy=multi-user.target\n")
 
@@ -42,12 +42,40 @@ func TestUnitText(t *testing.T) {
 	}
 
 	eq(t, strings.Contains(s.unit(Sample), "Description=Bugnet sampler\n"), true)
-	eq(t, strings.Contains(s.unit(Sample), "ExecStart=/tmp/bugnet/bin/bugnet-run sample "+
+	eq(t, strings.Contains(s.unit(Sample), "ExecStart=/usr/local/lib/bugnet/bugnet-run sample "+
 		"--config /etc/bugnet/sample.json\n"), true)
 
-	local := Supervisor{Root: Root{dir: "/s/fs"}, Exe: "/opt/bn run/bugnet-run"}
-	eq(t, strings.Contains(local.unit(Forward), "ExecStart=\"/opt/bn run/bugnet-run\" forward "+
-		"--config /s/fs/etc/bugnet/egress.json --root /s/fs\n"), true)
+	local := Supervisor{Root: Root{dir: "/s/bn fs"}}
+	eq(t, strings.Contains(local.unit(Forward), "ExecStart=\"/s/bn fs/usr/local/lib/bugnet/"+
+		"bugnet-run\" forward --config \"/s/bn fs/etc/bugnet/egress.json\" --root \"/s/bn fs\"\n"),
+		true)
+}
+
+func TestUnitsNameTheRunnersOwnPath(t *testing.T) {
+	t.Parallel()
+	local := Supervisor{Root: Root{dir: "/s/fs"}}
+	var runners []string
+	for _, svc := range Services {
+		if svc.Name == SSHD.Name {
+			continue
+		}
+		runners = append(runners, svc.Name)
+		for _, c := range []struct {
+			s    Supervisor
+			exec string
+		}{
+			{Supervisor{Root: System}, "ExecStart=/usr/local/lib/bugnet/bugnet-run " + svc.Name +
+				" --config " + svc.Config + "\n"},
+			{local, "ExecStart=/s/fs/usr/local/lib/bugnet/bugnet-run " + svc.Name + " --config " +
+				"/s/fs" + svc.Config + " --root /s/fs\n"},
+		} {
+			eq(t, svc.argv(c.s.Root)[0], c.s.Root.Path(RunnerPath))
+			if unit := c.s.unit(svc); !strings.Contains(unit, c.exec) {
+				t.Errorf("unit of %s lacks %q:\n%s", svc.Name, c.exec, unit)
+			}
+		}
+	}
+	eq(t, runners, []string{"gate", "forward", "sample"})
 }
 
 func TestSystemdQuote(t *testing.T) {
@@ -153,7 +181,7 @@ func TestSystemdStartAndRestart(t *testing.T) {
 	r := testRoot(t)
 	must(t, os.MkdirAll(r.Path(SystemdDir), 0o755))
 	fake := &fakeSystemctl{}
-	s := Supervisor{Root: r, Exe: "/tmp/bugnet/bin/bugnet-run", Systemctl: fake.run}
+	s := Supervisor{Root: r, Systemctl: fake.run}
 	ctx := context.Background()
 
 	must(t, s.Start(ctx, Gate))
@@ -174,12 +202,18 @@ func TestSetsidStartRunsInItsOwnSession(t *testing.T) {
 	t.Parallel()
 	r := testRoot(t)
 	s := Supervisor{Root: r}
-	svc := Service{Name: "sleeper", marker: "sleep", argv: func(Root, string) []string {
+	svc := Service{Name: "sleeper", marker: "sleep", argv: func(Root) []string {
 		return []string{"sleep", "30"}
 	}}
 	pid, err := s.spawn(svc)
 	must(t, err)
-	t.Cleanup(func() { _ = syscall.Kill(pid, syscall.SIGKILL) })
+	// Stop ended the pid, which the system may hand to another process by the cleanup
+	stopped := false
+	t.Cleanup(func() {
+		if !stopped {
+			_ = syscall.Kill(pid, syscall.SIGKILL)
+		}
+	})
 	pgid, err := syscall.Getpgid(pid)
 	must(t, err)
 	eq(t, pgid, pid)
@@ -189,6 +223,7 @@ func TestSetsidStartRunsInItsOwnSession(t *testing.T) {
 	eq(t, readFile(t, r.Path(RunDir+"/sleeper.pid")), strconv.Itoa(pid)+"\n")
 
 	must(t, s.Stop(svc))
+	stopped = true
 	waitGone(t, pid)
 }
 
@@ -242,16 +277,16 @@ func TestSSHDRunsTheRecordedPath(t *testing.T) {
 	r := testRoot(t)
 	s := Supervisor{Root: r}
 	cfg := r.Path(SSHDConfig)
-	eq(t, SSHD.argv(r, ""), []string{"/usr/sbin/sshd", "-D", "-e", "-f", cfg})
+	eq(t, SSHD.argv(r), []string{"/usr/sbin/sshd", "-D", "-e", "-f", cfg})
 
 	writeFile(t, r.Path(SSHDPathFile), "/opt/homebrew/sbin/sshd\n")
-	eq(t, SSHD.argv(r, ""), []string{"/opt/homebrew/sbin/sshd", "-D", "-e", "-f", cfg})
+	eq(t, SSHD.argv(r), []string{"/opt/homebrew/sbin/sshd", "-D", "-e", "-f", cfg})
 	eq(t, strings.Contains(s.unit(SSHD), "ExecStart=/opt/homebrew/sbin/sshd -D -e -f "+cfg+"\n"),
 		true)
 
 	for _, bad := range []string{"sshd\n", "\n", "/usr/sbin/../sbin/sshd\n", "/a\n/b\n"} {
 		writeFile(t, r.Path(SSHDPathFile), bad)
-		eq(t, SSHD.argv(r, "")[0], "/usr/sbin/sshd")
+		eq(t, SSHD.argv(r)[0], "/usr/sbin/sshd")
 	}
 }
 

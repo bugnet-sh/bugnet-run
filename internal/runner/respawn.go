@@ -72,7 +72,7 @@ func needed(root sandbox.Root) bool {
 
 // respawnServices starts each dead service, leaving the round to a setup that holds the sandbox
 func respawnServices(ctx context.Context, root sandbox.Root, exe string) ([]string, error) {
-	sup := sandbox.Supervisor{Root: root, Exe: exe}
+	sup := sandbox.Supervisor{Root: root}
 	if !needed(root) {
 		return nil, nil
 	}
@@ -92,7 +92,14 @@ func respawnServices(ctx context.Context, root sandbox.Root, exe string) ([]stri
 			started = append(started, firewallName)
 		}
 	}
-	for _, svc := range sup.Dead() {
+	dead := sup.Dead()
+	if len(dead) > 0 {
+		// A failed copy still lets each service start from the copy already in place
+		if _, err := sandbox.InstallRunner(root, exe); err != nil {
+			errs = append(errs, fmt.Errorf("install the runner: %w", err))
+		}
+	}
+	for _, svc := range dead {
 		if err := sup.Start(ctx, svc); err != nil {
 			errs = append(errs, fmt.Errorf("start %s: %w", svc.Name, err))
 			continue

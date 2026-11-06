@@ -471,12 +471,40 @@ func TestApplyUnderSystemd(t *testing.T) {
 	eq(t, out, `{"forward":"listening","hosts":1,"secrets":1}`)
 	eq(t, code, 0)
 	unit := readFile(t, root.Path(sandbox.UnitDir+"/bugnet-forward.service"))
-	eq(t, strings.Contains(unit, "\nExecStart="+binPath+" forward --config "+
+	eq(t, strings.Contains(unit, "\nExecStart="+root.Path(sandbox.RunnerPath)+" forward --config "+
 		root.Path(sandbox.EgressConfig)+" --root "+root.Dir()+"\n"), true)
 	eq(t, calls(), []string{"daemon-reload", "enable --quiet bugnet-forward.service",
 		"reset-failed bugnet-forward.service", "start bugnet-forward.service"})
 	addr := strings.TrimSpace(readFile(t, root.Path(addrFile)))
 	eq(t, roundTrip(t, dial(t, addr), "systemd"), "systemd")
+}
+
+func TestForwarderStartsCopyTheRunnerFirst(t *testing.T) {
+	t.Parallel()
+	root := testRoot(t)
+	must(t, os.MkdirAll(root.Path(sandbox.SystemdDir), 0o755))
+	runner := root.Path(sandbox.RunnerPath)
+	var calls []string
+	record := func(_ context.Context, args ...string) error {
+		if !exists(runner) {
+			t.Errorf("systemctl %v ran before the runner was copied", args)
+		}
+		calls = append(calls, strings.Join(args, " "))
+		return nil
+	}
+	exe := filepath.Join(t.TempDir(), "bugnet-run")
+	writeFile(t, exe, "runner v1\n")
+	fwd := supervised{sup: sandbox.Supervisor{Root: root, Systemctl: record}, exe: exe}
+	must(t, fwd.Start(context.Background(), "127.0.0.1:0"))
+	eq(t, readFile(t, runner), "runner v1\n")
+	eq(t, mode(t, runner), os.FileMode(0o755))
+	eq(t, strings.Contains(readFile(t, root.Path(sandbox.UnitDir+"/bugnet-forward.service")),
+		"\nExecStart="+runner+" forward "), true)
+
+	writeFile(t, exe, "runner v2\n")
+	must(t, fwd.Restart(context.Background()))
+	eq(t, readFile(t, runner), "runner v2\n")
+	eq(t, calls[len(calls)-1], "restart bugnet-forward.service")
 }
 
 /* Apply helpers */
@@ -662,6 +690,10 @@ func realRoot(t *testing.T, p *pki) sandbox.Root {
 	t.Helper()
 	root := testRoot(t)
 	writeFile(t, root.Path(rootsFile), string(p.pem))
+	// binPath itself as the runner, so no new copy pays macOS's check inside the listen wait
+	runner := root.Path(sandbox.RunnerPath)
+	must(t, os.MkdirAll(filepath.Dir(runner), 0o755))
+	must(t, os.Link(binPath, runner))
 	t.Cleanup(func() {
 		pid, err := sandbox.ReadPidFile(root, "forward")
 		if err != nil {

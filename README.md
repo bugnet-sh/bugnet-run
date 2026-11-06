@@ -82,8 +82,11 @@ These run as root. `--root DIR` maps every sandbox path under `DIR`, for the `lo
 1. Writes `/etc/bugnet/gate.key` (0600) and `/etc/bugnet/gate.json` (0644).
 2. Installs the Bugnet CA as `/usr/local/share/ca-certificates/bugnet-egress-v<N>.crt`.
 3. Writes `/etc/bugnet/env` and `/etc/profile.d/bugnet.sh`.
-4. Starts the gate, under systemd when `/run/systemd/system` exists, else with `setsid`.
-5. With `"sample": true`, writes `/etc/bugnet/sample.json` (0644) and starts the sampler, the
+4. Copies the running binary to `/usr/local/lib/bugnet/bugnet-run` (0755, owned by root). The
+   copy goes to a temporary file beside it and is renamed over it, so a service still running
+   the old file keeps it. A file that already holds the same bytes is left alone.
+5. Starts the gate, under systemd when `/run/systemd/system` exists, else with `setsid`.
+6. With `"sample": true`, writes `/etc/bugnet/sample.json` (0644) and starts the sampler, the
    same way. A sampler that does not start is logged on stderr and never fails setup. A later
    setup without `sample` leaves a running sampler alone.
 
@@ -106,7 +109,7 @@ The `ca` values:
 | `skipped` | Both are empty, and `/etc/bugnet/env` then holds no CA lines |
 
 A second run with the same spec changes nothing and keeps the same gate process. A new key or
-config restarts the gate. `--repair` redoes only steps 1 and 4. Without `--spec`, it keeps the
+config restarts the gate. `--repair` redoes only steps 1, 4 and 5. Without `--spec`, it keeps the
 gate files the last setup wrote.
 
 `gate --config /etc/bugnet/gate.json [--root DIR]` is the reverse proxy on `:29417`. Every
@@ -139,7 +142,7 @@ in this order:
    address and the hosts.
 3. Starts the forwarder, or sends it `SIGHUP` when its config or token changed. A new listen
    address restarts it. Before a start it binds the listen address for a moment, so a taken port
-   is found at once.
+   is found at once. A start or restart first copies the runner as `setup` does.
 4. Waits up to 5 s for the forwarder's pid file and for the listen address to accept.
 5. Rewrites the `/etc/hosts` block to `127.77.0.1 <host> <host> ...`. Lines stay under 500
    bytes, since musl reads 512 at a time. There is never a `::1` line.
@@ -346,7 +349,8 @@ counts from the level at the restart. It starts from zero when the file is not a
 at most 4 KiB, fails the strict decoding of version 1, or holds a number above 2^40.
 
 `respawn [--root DIR]` starts the gate, the forwarder, our sshd or the sampler when its config
-exists and its process is gone. It prints `{"started":["gate"]}`.
+exists and its process is gone. Before it starts any, it copies the runner as `setup` does. It
+prints `{"started":["gate"]}`.
 
 It also puts the firewall back. When `/etc/bugnet/firewall.rules` exists and the last check is a
 minute old or more, it checks that the table is loaded: `nft list tables` shows `table inet
@@ -367,9 +371,11 @@ Our sshd runs `<sshd_path> -D -e -f /etc/bugnet/ssh/sshd_config`, where `sshd_pa
 `/run/sshd` and `/run/bugnet`, which a boot empties.
 
 Under systemd each is a unit in `/etc/systemd/system` with `Restart=always`,
-`RuntimeDirectory=bugnet` and `RuntimeDirectoryPreserve=yes`. Units start from the runner's own
-path, `/tmp/bugnet/bin/bugnet-run`. A unit that fails 10 times within 60 s stops restarting.
-Respawn and setup run `systemctl reset-failed` before they start it again.
+`RuntimeDirectory=bugnet` and `RuntimeDirectoryPreserve=yes`. Every unit and every `setsid`
+start but our sshd's runs `/usr/local/lib/bugnet/bugnet-run`, mapped under `--root` like any
+other path, never the path the runner ran from. A boot that empties `/tmp` therefore leaves every
+unit able to start. A unit that fails 10 times within 60 s stops restarting. Respawn and setup
+run `systemctl reset-failed` before they start it again.
 
 Managed blocks sit between `# bugnet begin` and `# bugnet end`. A rewrite renames a new file over
 the old one. When the rename fails with `EBUSY` or `EXDEV`, as on a bind-mounted `/etc/hosts`,

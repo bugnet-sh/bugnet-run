@@ -137,8 +137,11 @@ func TestContainerApplyOnBindMountedHosts(t *testing.T) {
 			waitEcho(t, id)
 			eq(t, failsInContainer(id, "exec bash -c ': </dev/tcp/127.0.0.1/443'"), true)
 			pid := inContainer(t, id, "cat /run/bugnet/forward.pid")
+			// The forwarder runs the copy apply made, never the binary the router uploaded
 			eq(t, inContainer(t, id, "tr '\\0' ' ' </proc/"+pid+"/cmdline"),
-				"/usr/local/bin/bugnet-run forward --config /etc/bugnet/egress.json")
+				"/usr/local/lib/bugnet/bugnet-run forward --config /etc/bugnet/egress.json")
+			eq(t, inContainer(t, id, "stat -c '%a %U:%G' /usr/local/lib/bugnet/bugnet-run"),
+				"755 root:root")
 
 			hosts := inContainer(t, id, "cat /etc/hosts")
 			eq(t, containerApply(t, id, again), want)

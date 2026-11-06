@@ -40,7 +40,7 @@ type Service struct {
 	// marker appears in the process's command line, so a reused pid is never taken for it
 	marker  string
 	prepare func(Root) error
-	argv    func(r Root, exe string) []string
+	argv    func(r Root) []string
 }
 
 // Gate is the bugnet-run gate in front of the sandbox's ports
@@ -59,7 +59,7 @@ var Forward = Service{
 var SSHD = Service{
 	Name: "sshd", Config: SSHDConfig, description: "Bugnet sshd", runtimeDirs: "bugnet sshd",
 	killProcess: true, marker: "sshd", prepare: makeSSHDRunDirs,
-	argv: func(r Root, _ string) []string {
+	argv: func(r Root) []string {
 		return []string{SSHDPath(r), "-D", "-e", "-f", r.Path(SSHDConfig)}
 	},
 }
@@ -89,9 +89,10 @@ func SSHDPath(r Root) string {
 // Services lists every service respawn brings back, in start order
 var Services = []Service{Gate, Forward, SSHD, Sample}
 
-func runnerArgv(sub, config string) func(Root, string) []string {
-	return func(r Root, exe string) []string {
-		return append([]string{exe, sub, "--config", r.Path(config)}, r.Args()...)
+// runnerArgv starts from RunnerPath, so a /tmp emptied at boot never breaks a unit
+func runnerArgv(sub, config string) func(Root) []string {
+	return func(r Root) []string {
+		return append([]string{r.Path(RunnerPath), sub, "--config", r.Path(config)}, r.Args()...)
 	}
 }
 
@@ -111,8 +112,6 @@ func makeSSHDRunDirs(r Root) error {
 // Supervisor runs services under systemd where the sandbox boots it, else each in its own session
 type Supervisor struct {
 	Root Root
-	// Exe is the bugnet-run binary the gate and the forwarder run from
-	Exe string
 	// Systemctl runs systemctl, nil meaning the real one
 	Systemctl func(ctx context.Context, args ...string) error
 }
@@ -277,7 +276,7 @@ func unitName(svc Service) string {
 }
 
 func (s Supervisor) unit(svc Service) string {
-	argv := svc.argv(s.Root, s.Exe)
+	argv := svc.argv(s.Root)
 	quoted := make([]string, len(argv))
 	for i, a := range argv {
 		quoted[i] = systemdQuote(a)
@@ -335,7 +334,7 @@ func (s Supervisor) systemctl(ctx context.Context, args ...string) error {
 
 // spawn starts the service in its own session with stdio on /dev/null
 func (s Supervisor) spawn(svc Service) (int, error) {
-	argv := svc.argv(s.Root, s.Exe)
+	argv := svc.argv(s.Root)
 	CloseInherited()
 	cmd := exec.Command(argv[0], argv[1:]...)
 	cmd.Dir = "/"

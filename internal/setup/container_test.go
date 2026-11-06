@@ -117,6 +117,60 @@ func TestContainerGateWithoutIPv6(t *testing.T) {
 	}
 }
 
+// containerSystemctl stands in for systemctl, running a unit's ExecStart for a start
+const containerSystemctl = `#!/bin/sh
+case "$1" in start|restart) ;; *) exit 0 ;; esac
+argv=$(sed -n 's/^ExecStart=//p' "/etc/systemd/system/$2")
+setsid sh -c "exec $argv" </dev/null >/dev/null 2>&1 &
+`
+
+func TestContainerUnitsOutliveAnEmptyTmp(t *testing.T) {
+	needDocker(t)
+	bin := linuxBuild(t)
+	spec, err := json.Marshal(Spec{
+		V: 1, GateKey: testKey, GateListen: ":29417", DenyPorts: []int{29417, 22, 2022},
+	})
+	must(t, err)
+	for _, image := range containerImages {
+		t.Run(image, func(t *testing.T) {
+			id := docker(t, nil, "run", "-d", "--rm", "--init", "-p", "127.0.0.1::29417", image,
+				"sleep", "600")
+			t.Cleanup(func() { _ = exec.Command("docker", "rm", "-f", id).Run() })
+			addr := strings.Split(docker(t, nil, "port", id, "29417/tcp"), "\n")[0]
+			inContainer(t, id, "mkdir -p /tmp/bugnet/bin /run/systemd/system")
+			docker(t, nil, "cp", bin, id+":/tmp/bugnet/bin/bugnet-run")
+			docker(t, []byte(containerSystemctl), "exec", "-i", id, "sh", "-c",
+				"cat > /usr/local/sbin/systemctl && chmod 755 /usr/local/sbin/systemctl")
+			docker(t, spec, "exec", "-i", id, "sh", "-c",
+				"umask 077 && cat > /tmp/bugnet/setup-spec.json")
+			eq(t, docker(t, nil, "exec", id, "/tmp/bugnet/bin/bugnet-run", "setup", "--spec",
+				"/tmp/bugnet/setup-spec.json"),
+				`{"gate":"listening","ca":"skipped","init":"systemd"}`)
+			waitHealthy(t, addr)
+
+			// What a boot does to /tmp, without the reboot
+			inContainer(t, id, "rm -rf /tmp/bugnet/bin")
+			exe := inContainer(t, id,
+				`sed -n 's/^ExecStart=\([^ ]*\) .*/\1/p' /etc/systemd/system/bugnet-gate.service`)
+			eq(t, exe, "/usr/local/lib/bugnet/bugnet-run")
+			eq(t, inContainer(t, id, "test -x "+exe+" && stat -c '%a %U:%G' "+exe), "755 root:root")
+			pid := inContainer(t, id, "cat /run/bugnet/gate.pid")
+			eq(t, inContainer(t, id, "readlink /proc/"+pid+"/exe"), exe)
+
+			// A crashed gate comes back from the same path, as Restart=always would bring it
+			inContainer(t, id, "kill -9 "+pid)
+			eq(t, docker(t, nil, "exec", id, exe, "respawn"), `{"started":["gate"]}`)
+			waitHealthy(t, addr)
+			again := inContainer(t, id, "cat /run/bugnet/gate.pid")
+			if again == pid {
+				t.Fatal("respawn left the dead gate's pid in place")
+			}
+			eq(t, inContainer(t, id, "readlink /proc/"+again+"/exe"), exe)
+			eq(t, docker(t, nil, "exec", id, exe, "respawn"), `{"started":[]}`)
+		})
+	}
+}
+
 // inContainer runs script with the container's sh, so it needs no kill or ps binary
 func inContainer(t *testing.T, id, script string) string {
 	t.Helper()

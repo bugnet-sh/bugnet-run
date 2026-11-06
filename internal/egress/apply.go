@@ -144,8 +144,8 @@ func run(ctx context.Context, args []string) (result, error) {
 	if err != nil {
 		return result{}, fail(ErrApplyFailed, err)
 	}
-	sup := sandbox.Supervisor{Root: root, Exe: exe, Systemctl: systemctl}
-	fwd := supervised{sup: sup, wait: listenWait}
+	sup := sandbox.Supervisor{Root: root, Systemctl: systemctl}
+	fwd := supervised{sup: sup, exe: exe, wait: listenWait}
 	a := applier{root: root, sup: sup, fwd: fwd, trace: func(string) {}}
 	return a.apply(ctx, spec)
 }
@@ -477,7 +477,9 @@ func exists(path string) bool {
 
 // supervised drives the real forwarder under systemd or setsid
 type supervised struct {
-	sup  sandbox.Supervisor
+	sup sandbox.Supervisor
+	// exe is the running bugnet-run, copied to the runner path the forwarder starts from
+	exe  string
 	wait time.Duration
 }
 
@@ -487,10 +489,16 @@ func (s supervised) Start(ctx context.Context, listen string) error {
 	if err := probeListen(listen); err != nil {
 		return err
 	}
+	if _, err := sandbox.InstallRunner(s.sup.Root, s.exe); err != nil {
+		return err
+	}
 	return s.sup.Start(ctx, sandbox.Forward)
 }
 
 func (s supervised) Restart(ctx context.Context) error {
+	if _, err := sandbox.InstallRunner(s.sup.Root, s.exe); err != nil {
+		return err
+	}
 	return s.sup.Restart(ctx, sandbox.Forward)
 }
 
