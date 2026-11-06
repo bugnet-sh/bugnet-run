@@ -297,7 +297,9 @@ fails at once as refused or unreachable. A dropped one would hang until the clie
    interval sets `pools4` and `pools6`, with prefixes inside others left out.
 3. Without `nft`, or when `nft` fails, it refills a `BUGNET` chain with `iptables-restore
    --noflush` and `ip6tables-restore --noflush`, and makes `OUTPUT` jump to it once. Without IPv6
-   in the kernel (no `/proc/net/if_inet6`), an IPv6 failure is ignored.
+   in the kernel (no `/proc/net/if_inet6`), an IPv6 failure is ignored. Any other IPv6 failure
+   puts back the IPv4 chain that `/etc/bugnet/firewall.rules` keeps, or empties it when that file
+   holds no iptables ruleset. So both families load, or neither does.
 4. It keeps what loaded in `/etc/bugnet/firewall.rules` (0644), renamed into place only after the
    load. Its first line names the tool, `# bugnet-run harden nft` or `# bugnet-run harden
    iptables`. The iptables file holds the IPv4 input, a `# ipv6` line and the IPv6 input.

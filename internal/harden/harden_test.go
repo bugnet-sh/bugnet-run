@@ -371,6 +371,63 @@ func TestIptablesWithoutIPv6SkipsIt(t *testing.T) {
 	eq(t, f.run(t), `{"error":"firewall_unavailable"}`)
 }
 
+// A failed IPv6 load puts back the IPv4 chain firewall.rules keeps, so the two never differ
+func TestIptablesLoadsBothChainsOrNeither(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t, procFile("net/if_inet6", "x"))
+	f.fakes = newFakeTools("iptables")
+	f.h.tools = f.fakes.tools()
+	eq(t, f.run(t), `{"firewall":"iptables"}`)
+	f.fakes.take()
+	path := f.h.root.Path(RulesFile)
+	kept, err := os.ReadFile(path)
+	must(t, err)
+	oldV4, _ := f.h.rules(f.spec).iptables()
+
+	f.spec.Pools = append(f.spec.Pools, "203.0.113.0/24")
+	newV4, _ := f.h.rules(f.spec).iptables()
+	f.fakes.answer = func(c call) (string, error) {
+		if c.name == "ip6tables-restore" {
+			return "ip6tables-restore: line 3 failed", errors.New("exit status 1")
+		}
+		return "", nil
+	}
+	eq(t, f.run(t), `{"error":"firewall_unavailable"}`)
+	calls := f.fakes.take()
+	eq(t, names(calls), []string{
+		"iptables-restore --noflush", "iptables -w -C OUTPUT -j BUGNET",
+		"ip6tables-restore --noflush",
+		"iptables-restore --noflush", "iptables -w -C OUTPUT -j BUGNET",
+	})
+	eq(t, calls[0].stdin, newV4)
+	eq(t, calls[3].stdin, oldV4)
+	after, err := os.ReadFile(path)
+	must(t, err)
+	eq(t, string(after), string(kept))
+
+	// With no iptables ruleset kept, the IPv4 chain is left empty
+	for _, earlier := range []string{"", "# bugnet-run harden nft\ntable inet bugnet\n"} {
+		g := newFixture(t, procFile("net/if_inet6", "x"))
+		g.fakes = newFakeTools("iptables")
+		g.fakes.answer = f.fakes.answer
+		g.h.tools = g.fakes.tools()
+		if earlier != "" {
+			writeFile(t, g.h.root.Path(RulesFile), earlier)
+		}
+		eq(t, g.run(t), `{"error":"firewall_unavailable"}`)
+		calls := g.fakes.take()
+		eq(t, names(calls)[3], "iptables-restore --noflush")
+		eq(t, calls[3].stdin, "*filter\n:BUGNET - [0:0]\nCOMMIT\n")
+		got, err := os.ReadFile(g.h.root.Path(RulesFile))
+		if earlier == "" {
+			eq(t, errors.Is(err, os.ErrNotExist), true)
+		} else {
+			must(t, err)
+			eq(t, string(got), earlier)
+		}
+	}
+}
+
 func TestHardenInstallsNftablesWithNeither(t *testing.T) {
 	t.Parallel()
 	f := newFixture(t)

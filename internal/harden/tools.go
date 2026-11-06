@@ -100,15 +100,27 @@ func (h hardener) loadNft(ctx context.Context, nft, path string) error {
 	return err
 }
 
-// loadIptables leaves IPv6 out only where the kernel has no IPv6 at all
+// loadIptables loads both chains or neither, leaving IPv6 out only where the kernel has none
 func (h hardener) loadIptables(ctx context.Context, v4, v6 string) error {
 	if err := h.restore(ctx, "iptables", v4); err != nil {
 		return err
 	}
-	if err := h.restore(ctx, "ip6tables", v6); err != nil && h.ipv6() {
-		return err
+	err := h.restore(ctx, "ip6tables", v6)
+	if err == nil || !h.ipv6() {
+		return nil
 	}
-	return nil
+	return errors.Join(err, h.restore(ctx, "iptables", h.keptV4()))
+}
+
+// keptV4 is the IPv4 chain the kept ruleset holds, or an empty chain when it holds none
+func (h hardener) keptV4() string {
+	b, err := os.ReadFile(h.root.Path(RulesFile))
+	if err == nil {
+		if k, err := parseKept(b); err == nil && k.firewall == FirewallIptables {
+			return k.v4
+		}
+	}
+	return emptyChain
 }
 
 // restore refills the BUGNET chain and makes OUTPUT jump to it once

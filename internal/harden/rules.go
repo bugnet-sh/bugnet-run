@@ -263,6 +263,9 @@ func nftAddr(p netip.Prefix) string {
 
 /* iptables */
 
+// emptyChain makes iptables-restore --noflush empty BUGNET, so OUTPUT's jump blocks nothing
+const emptyChain = "*filter\n:BUGNET - [0:0]\nCOMMIT\n"
+
 // iptables gives iptables-restore and ip6tables-restore input that refills the BUGNET chain
 func (r rules) iptables() (v4, v6 string) {
 	return r.restore(true), r.restore(false)
