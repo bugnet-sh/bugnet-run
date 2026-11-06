@@ -177,10 +177,12 @@ Then, in this order:
    sshd without PAM refuses a locked account. Never under `--root`.
 7. It creates `/run/sshd` and `/run/bugnet` (0755).
 8. A new config, a new key or a new `sshd_path` is first checked with `sshd -t`, reading the new
-   key where it waits. Only then does it write `/etc/bugnet/ssh/sshd_config`, `sshd_path` and
-   `port`, and rename the new key over `host_ed25519_key`. A refused check changes none of them.
+   key where it waits. Only then does it write `/etc/bugnet/ssh/sshd_config`, `port` and, last,
+   `sshd_path`, and rename the new key over `host_ed25519_key`. A refused check changes none of
+   them.
 9. It starts our sshd under systemd or `setsid`. A running sshd gets `SIGHUP` when its config or
-   host key changed, and a restart when `sshd_path` changed.
+   host key changed, and a restart when `sshd_path` changed. Any of these files newer than sshd's
+   pid file also counts as changed, since a run killed before its signal leaves one behind.
 10. It waits up to 10 s for `127.0.0.1:<port>` to accept. After a `SIGHUP` it also waits for sshd
     to write its pid file again, which sshd does once it listens again. Until then the old
     listener may still answer.

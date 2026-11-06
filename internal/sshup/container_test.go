@@ -263,9 +263,12 @@ func TestContainerSshUpInstallsOnEmptyLists(t *testing.T) {
 				"root 600")
 			eq(t, inContainer(t, id, "cat /etc/bugnet/ssh/authorized_keys"), gwLine)
 
+			// sshd wrote its pid file after reading its files, so nothing counts as owed
+			loaded := inContainer(t, id, "stat -c %y /run/bugnet/sshd.pid")
 			s.Authorize = []string{clientKey(t, id)}
 			eq(t, mustUp(t, id, s), res)
 			eq(t, inContainer(t, id, "cat /run/bugnet/sshd.pid"), pid)
+			eq(t, inContainer(t, id, "stat -c %y /run/bugnet/sshd.pid"), loaded)
 			eq(t, login(t, id, "root", res, "id -un"), "root")
 
 			inContainer(t, id, "kill -9 "+pid)

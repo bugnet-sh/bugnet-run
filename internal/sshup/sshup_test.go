@@ -268,6 +268,18 @@ func TestSshUpReportsTheKeySshdServes(t *testing.T) {
 	eq(t, f.sshd.served(), fresh.HostKey)
 	eq(t, f.sshd.take(), []string{"hup", "wait 22", "wait 22"})
 
+	// A run killed between the key's rename and its SIGHUP leaves the reload owed
+	f.sshd.lostSignal = true
+	line, _ = f.up(t, f.spec(), "--new-host-key")
+	eq(t, line, `{"error":"sshd_failed"}`)
+	f.sshd.lostSignal = false
+	owed := f.sshUp(t, f.spec())
+	eq(t, owed.HostKey != fresh.HostKey, true)
+	eq(t, f.sshd.served(), owed.HostKey)
+	eq(t, f.sshd.take(), []string{"hup", "hup", "wait 22"})
+	eq(t, f.sshUp(t, f.spec()), owed)
+	eq(t, f.sshd.take(), []string{"wait 22"})
+
 	writeFile(t, keyFile, "not a key\n")
 	must(t, os.Chmod(keyFile, 0o600))
 	f.sshd.refuse = true
@@ -279,6 +291,84 @@ func TestSshUpReportsTheKeySshdServes(t *testing.T) {
 	eq(t, f.sshd.served(), last.HostKey)
 	eq(t, f.sshd.take(), []string{"hup", "wait 22"})
 	eq(t, dotFiles(t, f.root), []string(nil))
+}
+
+func TestSshUpRecordsSshdPathLast(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t)
+	f.sshUp(t, f.spec())
+	f.sshd.take()
+	s := f.spec()
+	s.SSHDPath = filepath.Join(f.dir, "other", "sshd")
+	writeFile(t, s.SSHDPath, "#!/bin/sh\n")
+	must(t, os.Chmod(s.SSHDPath, 0o755))
+
+	// A port file that cannot be written stops the run before sshd_path and the restart
+	port := f.root.Path(sandbox.SSHPortFile)
+	must(t, os.Remove(port))
+	must(t, os.MkdirAll(filepath.Join(port, "busy"), 0o755))
+	line, _ := f.up(t, s)
+	eq(t, line, `{"error":"sshd_failed"}`)
+	eq(t, f.read(t, sandbox.SSHDPathFile), f.sshdPath+"\n")
+	eq(t, f.sshd.take(), []string(nil))
+
+	must(t, os.RemoveAll(port))
+	f.sshUp(t, s)
+	eq(t, f.sshd.take(), []string{"restart", "wait 22"})
+	eq(t, f.read(t, sandbox.SSHDPathFile), s.SSHDPath+"\n")
+}
+
+func TestSshUpSignalsWhatAKilledRunWrote(t *testing.T) {
+	t.Parallel()
+	root, err := sandbox.NewRoot(t.TempDir())
+	must(t, err)
+	t.Cleanup(func() { stopPidFile(t, root, "sshd") })
+	from, to := freePort(t), freePort(t)
+	dir := t.TempDir()
+	up := func(port int, tune func(*upper)) (Result, error) {
+		t.Helper()
+		spec, err := json.Marshal(Spec{
+			V: 1, User: "boxd", Ports: []int{port}, SSHDPath: fakeSSHDPath,
+			Authorize: []string{gwLine},
+		})
+		must(t, err)
+		path := filepath.Join(dir, "ssh-spec.json")
+		must(t, os.WriteFile(path, spec, 0o600))
+		return run(context.Background(), []string{"--spec", path, "--root", root.Dir()}, tune)
+	}
+	shortWait := func(u *upper) { u.sshd = supervised{sup: u.sup, wait: 2 * time.Second} }
+	res, err := up(from, shortWait)
+	must(t, err)
+	eq(t, res.Port, from)
+
+	// The killed run wrote the config and port file for the new port but sent no SIGHUP
+	_, err = up(to, func(u *upper) {
+		shortWait(u)
+		u.sshd = unsignalled{u.sshd}
+	})
+	eq(t, err != nil, true)
+	eq(t, strings.TrimSpace(readRoot(t, root, sandbox.SSHPortFile)), strconv.Itoa(to))
+	eq(t, acceptsAt(net.JoinHostPort("127.0.0.1", strconv.Itoa(from))), true)
+
+	res, err = up(to, shortWait)
+	must(t, err)
+	eq(t, res.Port, to)
+	eq(t, acceptsAt(net.JoinHostPort("127.0.0.1", strconv.Itoa(to))), true)
+	b, err := os.ReadFile(filepath.Join(root.Path(sandbox.SSHDir), "fake-sshd.log"))
+	must(t, err)
+	eq(t, string(b), "start "+strconv.Itoa(from)+"\nhup "+strconv.Itoa(to)+"\n")
+}
+
+// unsignalled stands in for a run killed after its writes and before its SIGHUP
+type unsignalled struct{ daemon }
+
+func (unsignalled) Reload() error { return errors.New("killed before the signal") }
+
+func readRoot(t *testing.T, root sandbox.Root, path string) string {
+	t.Helper()
+	b, err := os.ReadFile(root.Path(path))
+	must(t, err)
+	return string(b)
 }
 
 func TestSshUpClearsWhatAKilledRunLeft(t *testing.T) {

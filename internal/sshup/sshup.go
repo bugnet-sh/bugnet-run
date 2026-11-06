@@ -535,11 +535,13 @@ func (u upper) runSSHD(ctx context.Context, s Spec, port int, key hostKey) error
 	if err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return err
 	}
-	cfgChanged := !bytes.Equal(old, config)
-	keyChanged := key.pending != ""
-	pathChanged := sandbox.SSHDPath(u.root) != s.SSHDPath
 	running := u.sshd.Running()
-	if !running || cfgChanged || keyChanged || pathChanged {
+	owed := u.owed(running)
+	keyChanged := key.pending != ""
+	reload := !bytes.Equal(old, config) || keyChanged || owed(sandbox.SSHDConfig) ||
+		owed(sandbox.HostKeyFile)
+	restart := sandbox.SSHDPath(u.root) != s.SSHDPath || owed(sandbox.SSHDPathFile)
+	if !running || reload || restart {
 		checked := config
 		if keyChanged {
 			checked = []byte(sshdConfig(u.root, port, s.User, key.pending, setEnv))
@@ -548,13 +550,14 @@ func (u upper) runSSHD(ctx context.Context, s Spec, port int, key hostKey) error
 			return err
 		}
 	}
+	// sshd_path goes last, so a run that stops before writing it leaves the restart to the next
 	for _, f := range []struct {
 		path string
 		data []byte
 	}{
-		{sandbox.SSHDPathFile, []byte(s.SSHDPath + "\n")},
 		{sandbox.SSHDConfig, config},
 		{sandbox.SSHPortFile, []byte(strconv.Itoa(port) + "\n")},
+		{sandbox.SSHDPathFile, []byte(s.SSHDPath + "\n")},
 	} {
 		if _, err := sandbox.WriteFile(u.root.Path(f.path), f.data, 0o644); err != nil {
 			return err
@@ -569,9 +572,9 @@ func (u upper) runSSHD(ctx context.Context, s Spec, port int, key hostKey) error
 	switch {
 	case !running:
 		err = u.sshd.Start(ctx)
-	case pathChanged:
+	case restart:
 		err = u.sshd.Restart(ctx)
-	case cfgChanged || keyChanged:
+	case reload:
 		// The old listener answers until sshd acts on the signal, so Wait looks for a new load
 		since = u.sshd.Loaded()
 		err = u.sshd.Reload()
@@ -580,6 +583,18 @@ func (u upper) runSSHD(ctx context.Context, s Spec, port int, key hostKey) error
 		return err
 	}
 	return u.sshd.Wait(ctx, port, since)
+}
+
+// owed reports a file newer than sshd's pid file, which a run killed before its signal leaves
+func (u upper) owed(running bool) func(name string) bool {
+	var loaded time.Time
+	if running {
+		loaded = u.sshd.Loaded()
+	}
+	return func(name string) bool {
+		info, err := os.Stat(u.root.Path(name))
+		return !loaded.IsZero() && err == nil && info.ModTime().After(loaded)
+	}
 }
 
 // sshdConfig is DP 6.4's text, with no Include since E2B's drop-in allows empty passwords
