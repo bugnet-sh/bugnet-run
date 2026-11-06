@@ -99,6 +99,60 @@ func withAfterOpen(t *testing.T, fn func(*os.File)) {
 	})
 }
 
+// withAfterMkdir sets the hook that runs once a new directory is made, for one test at a time
+func withAfterMkdir(t *testing.T, fn func(dir string)) {
+	t.Helper()
+	hooks.Lock()
+	afterMkdir = fn
+	t.Cleanup(func() {
+		afterMkdir = func(string) {}
+		hooks.Unlock()
+	})
+}
+
+func TestNewDirectorySwappedForALinkIsNeverFollowed(t *testing.T) {
+	dir := t.TempDir()
+	u := me(t)
+	src := filepath.Join(dir, "src")
+	writeFile(t, src, "data", 0o600)
+	victim := filepath.Join(dir, "etc", "victim")
+	must(t, os.MkdirAll(victim, 0o755))
+	must(t, os.Chmod(victim, 0o751))
+	uid, gid := owner(t, victim)
+	swapped := ""
+	withAfterMkdir(t, func(made string) {
+		if swapped != "" {
+			return
+		}
+		swapped = made
+		must(t, os.Remove(made))
+		must(t, os.Symlink(victim, made))
+	})
+	for _, c := range []struct {
+		cmd  subcommand
+		args []string
+		want string
+	}{
+		{StageOut, []string{"--from", src, "--to", filepath.Join(dir, "stage", "new", "f"),
+			"--owner", u.Username}, `{"error":"stage_failed"}`},
+		{Place, []string{"--from", src, "--to", filepath.Join(dir, "place", "new", "f")},
+			`{"error":"place_failed"}`},
+	} {
+		swapped = ""
+		line, code := call(t, c.cmd, c.args...)
+		eq(t, line, c.want)
+		eq(t, code, 1)
+		eq(t, swapped != "", true)
+		fi, err := os.Stat(victim)
+		must(t, err)
+		eq(t, fi.Mode().Perm(), fs.FileMode(0o751))
+		u, g := owner(t, victim)
+		eq(t, [2]int{u, g}, [2]int{uid, gid})
+		eq(t, len(mustReadDir(t, victim)), 0)
+	}
+	eq(t, readFile(t, src), "data")
+}
+
 func TestStatReportsKindWithoutFollowing(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()

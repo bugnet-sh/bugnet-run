@@ -44,10 +44,11 @@ const (
 	exitBadArgs = 2
 )
 
-// Variables so tests can change a source once it is open and fail a rename with EXDEV
+// Variables so tests can change a source once it is open, swap a new directory and fail a rename
 var (
-	afterOpen = func(*os.File) {}
-	rename    = os.Rename
+	afterOpen  = func(*os.File) {}
+	afterMkdir = func(string) {}
+	rename     = os.Rename
 )
 
 type failure struct {
@@ -264,6 +265,7 @@ func mkdirOwned(dir string, uid, gid int, perm fs.FileMode) error {
 	if err := os.Mkdir(dir, perm); err != nil && !errors.Is(err, fs.ErrExist) {
 		return err
 	}
+	afterMkdir(dir)
 	// Owner and mode go through a descriptor, so a link swapped in meanwhile is never followed
 	d, err := os.OpenFile(dir, os.O_RDONLY|syscall.O_DIRECTORY|syscall.O_NOFOLLOW, 0)
 	if err != nil {
