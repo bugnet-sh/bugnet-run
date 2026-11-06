@@ -236,14 +236,16 @@ func hasControl(s string) bool {
 // daemon is how ssh-up drives our sshd, a seam for tests
 type daemon interface {
 	Running() bool
+	// Loaded returns when sshd last read its config and host key, the time of its pid file
+	Loaded() time.Time
 	// Check runs sshd -t on config before it replaces the one a running sshd uses
 	Check(ctx context.Context, sshdPath string, config []byte) error
 	Start(ctx context.Context) error
 	Restart(ctx context.Context) error
 	// Reload sends SIGHUP, which makes sshd read its config and host key again
 	Reload() error
-	// Wait returns once the port accepts on 127.0.0.1, or after its wait
-	Wait(ctx context.Context, port int) error
+	// Wait returns once the port accepts and sshd's last load is not the one at since, or times out
+	Wait(ctx context.Context, port int, since time.Time) error
 }
 
 type upper struct {
@@ -563,18 +565,21 @@ func (u upper) runSSHD(ctx context.Context, s Spec, port int, key hostKey) error
 			return err
 		}
 	}
+	var since time.Time
 	switch {
 	case !running:
 		err = u.sshd.Start(ctx)
 	case pathChanged:
 		err = u.sshd.Restart(ctx)
 	case cfgChanged || keyChanged:
+		// The old listener answers until sshd acts on the signal, so Wait looks for a new load
+		since = u.sshd.Loaded()
 		err = u.sshd.Reload()
 	}
 	if err != nil {
 		return err
 	}
-	return u.sshd.Wait(ctx, port)
+	return u.sshd.Wait(ctx, port, since)
 }
 
 // sshdConfig is DP 6.4's text, with no Include since E2B's drop-in allows empty passwords
@@ -674,6 +679,15 @@ type supervised struct {
 
 func (s supervised) Running() bool { return s.sup.Running(sandbox.SSHD) }
 
+// Loaded is the time of the pid file sshd writes once it has read its files and listens
+func (s supervised) Loaded() time.Time {
+	info, err := os.Stat(s.sup.Root.Path(sandbox.PidFile(sandbox.SSHD.Name)))
+	if err != nil {
+		return time.Time{}
+	}
+	return info.ModTime()
+}
+
 func (s supervised) Check(ctx context.Context, sshdPath string, config []byte) error {
 	tmp, err := os.CreateTemp(s.sup.Root.Path(sandbox.SSHDir), checkPrefix+"*")
 	if err != nil {
@@ -722,12 +736,13 @@ func (s supervised) Reload() error {
 	return err
 }
 
-// Wait trusts the pid file sshd writes once it listens, and then a connect
-func (s supervised) Wait(ctx context.Context, port int) error {
+// Wait trusts a pid file sshd wrote after since, as it writes one once it listens, and a connect
+func (s supervised) Wait(ctx context.Context, port int, since time.Time) error {
 	addr := net.JoinHostPort("127.0.0.1", strconv.Itoa(port))
 	deadline := time.Now().Add(s.wait)
 	for {
-		if s.Running() && accepts(ctx, addr) {
+		reloaded := since.IsZero() || !s.Loaded().Equal(since)
+		if s.Running() && reloaded && accepts(ctx, addr) {
 			return nil
 		}
 		if time.Now().After(deadline) {

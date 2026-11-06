@@ -11,7 +11,11 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 )
+
+// hupDelay is how long the old listener keeps answering after a SIGHUP, as when sshd acts on it late
+const hupDelay = 300 * time.Millisecond
 
 func main() {
 	cfgPath, test := "", false
@@ -49,9 +53,7 @@ func main() {
 	ln := listen(cfg)
 	record(logPath, "start "+cfg["port"])
 	pidFile := cfg["pidfile"]
-	if err := os.WriteFile(pidFile, []byte(strconv.Itoa(os.Getpid())+"\n"), 0o644); err != nil {
-		die("pid file")
-	}
+	writePid(pidFile)
 	signals := make(chan os.Signal, 4)
 	signal.Notify(signals, syscall.SIGHUP, syscall.SIGTERM)
 	for sig := range signals {
@@ -59,16 +61,24 @@ func main() {
 			_ = os.Remove(pidFile)
 			return
 		}
+		// sshd drops its pid file and listener, runs itself again, and writes the pid file last
+		time.Sleep(hupDelay)
+		_ = os.Remove(pidFile)
+		_ = ln.Close()
 		next, err := readConfig(cfgPath)
 		if err != nil {
 			die("bad config on reload")
 		}
+		ln = listen(next)
 		record(logPath, "hup "+next["port"])
-		if next["port"] != cfg["port"] {
-			_ = ln.Close()
-			ln = listen(next)
-		}
-		cfg = next
+		pidFile = next["pidfile"]
+		writePid(pidFile)
+	}
+}
+
+func writePid(path string) {
+	if err := os.WriteFile(path, []byte(strconv.Itoa(os.Getpid())+"\n"), 0o644); err != nil {
+		die("pid file")
 	}
 }
 

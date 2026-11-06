@@ -203,6 +203,17 @@ func sessionEnv(t *testing.T, id string, res Result) map[string]string {
 	return env
 }
 
+// scanKey returns the ed25519 host key sshd serves on port, empty when nothing answers
+func scanKey(id string, port int) string {
+	out, _ := exec.Command("docker", "exec", id, "sh", "-c", "ssh-keyscan -t ed25519 -p "+
+		strconv.Itoa(port)+" 127.0.0.1 2>/dev/null").Output()
+	fields := strings.Fields(string(out))
+	if len(fields) < 3 {
+		return ""
+	}
+	return strings.Join(fields[1:3], " ")
+}
+
 func containerSpec(user string) Spec {
 	return Spec{
 		V: 1, User: user, Ports: []int{22, 2022}, SSHDPath: "/usr/sbin/sshd",
@@ -272,9 +283,12 @@ func TestContainerSshUpInstallsOnEmptyLists(t *testing.T) {
 			eq(t, fresh.HostKey != moved.HostKey, true)
 			eq(t, inContainer(t, id, "ls -A /etc/bugnet/ssh"),
 				"authorized_keys\nhost_ed25519_key\nport\nsshd_config\nsshd_path")
-			// sshd closes its listener for a moment while it runs itself again after SIGHUP
-			pin(t, id, fresh)
-			waitIn(t, id, sshCommand("root", fresh, "true"))
+			// ssh-up prints once sshd listens again after its SIGHUP, so a scan right after works
+			for range 20 {
+				fresh = mustUp(t, id, s, "--new-host-key")
+				eq(t, scanKey(id, fresh.Port), fresh.HostKey)
+			}
+			eq(t, login(t, id, "root", fresh, "id -un"), "root")
 		})
 	}
 }

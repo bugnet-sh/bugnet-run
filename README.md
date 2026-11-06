@@ -181,7 +181,9 @@ Then, in this order:
    `port`, and rename the new key over `host_ed25519_key`. A refused check changes none of them.
 9. It starts our sshd under systemd or `setsid`. A running sshd gets `SIGHUP` when its config or
    host key changed, and a restart when `sshd_path` changed.
-10. It waits up to 10 s for `127.0.0.1:<port>` to accept.
+10. It waits up to 10 s for `127.0.0.1:<port>` to accept. After a `SIGHUP` it also waits for sshd
+    to write its pid file again, which sshd does once it listens again. Until then the old
+    listener may still answer.
 
 It prints `{"port":22,"host_key":"ssh-ed25519 AAAA..."}` and exits 0. The key it prints is the one
 our sshd serves. A second run with the same spec changes no file and keeps the same sshd. On an

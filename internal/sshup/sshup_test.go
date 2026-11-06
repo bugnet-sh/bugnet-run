@@ -632,10 +632,14 @@ func TestSshUpRunsSupervisedSshd(t *testing.T) {
 	eq(t, again, pid)
 	eq(t, log(), "start "+p+"\n")
 
+	// ssh-up prints only once sshd has listened again after its SIGHUP
 	writeFile(t, root.Path(sandbox.SecretsEnvFile), "HF_TOKEN=bnsec_bbbbbbbbbbbbbbbbbbbbbbbbbb\n")
 	up()
-	waitFor(t, 5*time.Second, func() bool { return strings.Count(log(), "\n") == 2 })
 	eq(t, log(), "start "+p+"\nhup "+p+"\n")
+	eq(t, acceptsAt("127.0.0.1:"+p), true)
+	again, err = sandbox.ReadPidFile(root, "sshd")
+	must(t, err)
+	eq(t, again, pid)
 
 	must(t, syscall.Kill(pid, syscall.SIGKILL))
 	waitFor(t, 5*time.Second, func() bool { return gone(pid) })

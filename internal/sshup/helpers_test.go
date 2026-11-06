@@ -126,8 +126,10 @@ type fakeDaemon struct {
 	// checkedKeys holds the public line of the key each checked config named, read at the check
 	checkedKeys []string
 	serving     string
-	refuse      bool
-	failWait    bool
+	// loaded is when the fake last read its files, as the time of sshd's pid file
+	loaded   time.Time
+	refuse   bool
+	failWait bool
 }
 
 func (d *fakeDaemon) Running() bool {
@@ -153,7 +155,7 @@ func (d *fakeDaemon) Start(context.Context) error {
 	defer d.mu.Unlock()
 	d.calls = append(d.calls, "start")
 	d.running = true
-	d.serving = keyLine(d.keyFile)
+	d.serving, d.loaded = keyLine(d.keyFile), time.Now()
 	return nil
 }
 
@@ -162,7 +164,7 @@ func (d *fakeDaemon) Restart(context.Context) error {
 	defer d.mu.Unlock()
 	d.calls = append(d.calls, "restart")
 	d.running = true
-	d.serving = keyLine(d.keyFile)
+	d.serving, d.loaded = keyLine(d.keyFile), time.Now()
 	return nil
 }
 
@@ -170,8 +172,14 @@ func (d *fakeDaemon) Reload() error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	d.calls = append(d.calls, "hup")
-	d.serving = keyLine(d.keyFile)
+	d.serving, d.loaded = keyLine(d.keyFile), time.Now()
 	return nil
+}
+
+func (d *fakeDaemon) Loaded() time.Time {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.loaded
 }
 
 // served returns the public line of the host key the fake loaded last
@@ -215,7 +223,7 @@ func dotFiles(t *testing.T, root sandbox.Root) []string {
 	return names
 }
 
-func (d *fakeDaemon) Wait(_ context.Context, port int) error {
+func (d *fakeDaemon) Wait(_ context.Context, port int, _ time.Time) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	d.calls = append(d.calls, fmt.Sprintf("wait %d", port))
