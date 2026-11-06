@@ -261,11 +261,11 @@ func (u upper) up(ctx context.Context, s Spec) (Result, error) {
 	if err := s.check(); err != nil {
 		return Result{}, fail(ErrBadSpec, err)
 	}
-	if err := u.ensureSSHD(ctx, s); err != nil {
-		return Result{}, err
-	}
 	if err := makeDirs(u.root); err != nil {
 		return Result{}, fail(ErrSSHDFailed, err)
+	}
+	if err := u.ensureSSHD(ctx, s); err != nil {
+		return Result{}, err
 	}
 	unlock, err := sandbox.Lock(u.root)
 	if err != nil {
@@ -304,11 +304,20 @@ func (u upper) up(ctx context.Context, s Spec) (Result, error) {
 
 // ensureSSHD installs openssh-server only where the spec allows it and the root is the sandbox's
 func (u upper) ensureSSHD(ctx context.Context, s Spec) error {
+	if !s.Install || !u.system {
+		if executable(s.SSHDPath) {
+			return nil
+		}
+		return fail(ErrSSHDMissing, errors.New("sshd_path is not an executable file"))
+	}
+	// A second run waits here, so it never takes an sshd that dpkg unpacked but has not set up
+	unlock, err := installLock(u.root)
+	if err != nil {
+		return fail(ErrSSHDFailed, err)
+	}
+	defer unlock()
 	if executable(s.SSHDPath) {
 		return nil
-	}
-	if !s.Install || !u.system {
-		return fail(ErrSSHDMissing, errors.New("sshd_path is not an executable file"))
 	}
 	if err := u.install(ctx, time.Duration(s.InstallTimeoutS)*time.Second); err != nil {
 		return fail(ErrInstallFailed, err)
@@ -318,6 +327,19 @@ func (u upper) ensureSSHD(ctx context.Context, s Spec) error {
 		return fail(ErrSSHDMissing, errors.New("the install left no executable at sshd_path"))
 	}
 	return nil
+}
+
+// installLock takes an flock on /etc/bugnet/ssh, which installs alone take
+func installLock(r sandbox.Root) (func(), error) {
+	f, err := os.Open(r.Path(sandbox.SSHDir))
+	if err != nil {
+		return nil, err
+	}
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
+		_ = f.Close()
+		return nil, err
+	}
+	return func() { _ = f.Close() }, nil
 }
 
 func executable(path string) bool {

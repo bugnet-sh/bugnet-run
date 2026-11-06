@@ -385,6 +385,54 @@ func TestSshUpInstallsWhenAllowed(t *testing.T) {
 	eq(t, line, `{"error":"sshd_missing"}`)
 }
 
+func TestSshUpWaitsForAnotherInstall(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t)
+	f.system = true
+	must(t, os.Remove(f.sshdPath))
+	s := f.spec()
+	s.Install = true
+	b, err := json.Marshal(s)
+	must(t, err)
+	specPath := filepath.Join(f.dir, "ssh-spec.json")
+	must(t, os.WriteFile(specPath, b, 0o600))
+
+	dir := f.root.Path(sandbox.SSHDir)
+	must(t, os.MkdirAll(dir, 0o755))
+	held, err := os.Open(dir)
+	must(t, err)
+	must(t, syscall.Flock(int(held.Fd()), syscall.LOCK_EX))
+	type outcome struct {
+		res Result
+		err error
+	}
+	done := make(chan outcome, 1)
+	go func() {
+		res, err := run(context.Background(), []string{"--spec", specPath, "--root",
+			f.root.Dir()}, f.tune)
+		done <- outcome{res, err}
+	}()
+	select {
+	case o := <-done:
+		t.Fatalf("ssh-up ended with %+v and %v while another install held the lock", o.res, o.err)
+	case <-time.After(300 * time.Millisecond):
+	}
+
+	// The other run's install leaves sshd in place before it lets go
+	writeFile(t, f.sshdPath, "#!/bin/sh\n")
+	must(t, os.Chmod(f.sshdPath, 0o755))
+	must(t, held.Close())
+	select {
+	case o := <-done:
+		must(t, o.err)
+		eq(t, o.res.Port, 22)
+	case <-time.After(5 * time.Second):
+		t.Fatal("ssh-up never went on once the lock was free")
+	}
+	eq(t, len(f.installs), 0)
+	eq(t, f.systemctl, []string(nil))
+}
+
 func TestSshUpStopsTheDistroSshdItInstalled(t *testing.T) {
 	t.Parallel()
 	f := newFixture(t)

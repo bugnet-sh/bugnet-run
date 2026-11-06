@@ -163,7 +163,9 @@ Then, in this order:
 1. When `sshd_path` is not an executable file and `install` is true, it runs `apt-get update` and
    `apt-get install -y --no-install-recommends openssh-server`, with `DEBIAN_FRONTEND` set to
    `noninteractive`, within `install_timeout_s` for both. If the install started a distro sshd,
-   it is stopped and disabled. This step runs outside the sandbox lock, and never under `--root`.
+   it is stopped and disabled. This step never runs under `--root`. It runs outside the sandbox
+   lock, under an `flock` of `/etc/bugnet/ssh` that only this step takes. A second run waits
+   there and then finds sshd in place.
 2. Under the sandbox lock, it removes the dot-files in `/etc/bugnet/ssh` that a killed run left.
 3. It keeps the port of our running sshd. Otherwise it binds `127.0.0.1` on each of `ports` in
    turn for a moment and takes the first that binds.
