@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -249,4 +250,107 @@ func exitCode(err error) int {
 		return x.ExitCode()
 	}
 	panic(fmt.Sprint(err))
+}
+
+// buildFakeSSHD builds the sshd stand-in, named so its command line holds sshd
+func buildFakeSSHD(t *testing.T) string {
+	t.Helper()
+	bin := filepath.Join(t.TempDir(), "fake-sshd")
+	build := exec.Command("go", "build", "-o", bin, "../sshup/testdata/fakesshd")
+	if out, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build fakesshd: %v\n%s", err, out)
+	}
+	return bin
+}
+
+func TestRespawnBringsBackSshdAfterRunWiped(t *testing.T) {
+	t.Parallel()
+	fake := buildFakeSSHD(t)
+	root, err := sandbox.NewRoot(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	port := ln.Addr().(*net.TCPAddr).Port
+	_ = ln.Close()
+	addr := net.JoinHostPort("127.0.0.1", strconv.Itoa(port))
+	spec := fmt.Sprintf(`{"v":1,"user":"boxd","ports":[%d],"sshd_path":%q,"authorize":[]}`,
+		port, fake)
+	specPath := filepath.Join(t.TempDir(), "ssh-spec.json")
+	if err := os.WriteFile(specPath, []byte(spec), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if pid, err := sandbox.ReadPidFile(root, "sshd"); err == nil {
+			_ = syscall.Kill(pid, syscall.SIGTERM)
+			waitFor(t, 5*time.Second, func() bool { return gone(pid) })
+		}
+	})
+	var res struct {
+		Port    int    `json:"port"`
+		HostKey string `json:"host_key"`
+	}
+	if err := json.Unmarshal(runRaw(t, "ssh-up", "--spec", specPath, "--root", root.Dir()),
+		&res); err != nil {
+		t.Fatal(err)
+	}
+	eq(t, res.Port, port)
+	eq(t, strings.HasPrefix(res.HostKey, "ssh-ed25519 "), true)
+	sshd := func() int {
+		var pid int
+		waitFor(t, 5*time.Second, func() bool {
+			pid, err = sandbox.ReadPidFile(root, "sshd")
+			return err == nil && !gone(pid) && dials(addr)
+		})
+		return pid
+	}
+	pid := sshd()
+
+	if err := syscall.Kill(pid, syscall.SIGKILL); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, 5*time.Second, func() bool { return gone(pid) })
+	if err := os.RemoveAll(root.Path("/run")); err != nil {
+		t.Fatal(err)
+	}
+	eq(t, strings.TrimSpace(string(runRaw(t, "respawn", "--root", root.Dir()))),
+		`{"started":["sshd"]}`)
+	again := sshd()
+	eq(t, again != pid, true)
+	if _, err := os.Stat(root.Path(sandbox.SSHDRunDir)); err != nil {
+		t.Fatalf("respawn left sshd without its run directory: %v", err)
+	}
+
+	if err := syscall.Kill(again, syscall.SIGKILL); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, 5*time.Second, func() bool { return gone(again) })
+	startJob(t, t.TempDir(), "after", nil, "--root", root.Dir(), "--", "true").collect(t, 0, 0).
+		mustExit(t)
+	if third := sshd(); third == again {
+		t.Fatalf("the dead sshd's pid %d is still recorded", again)
+	}
+}
+
+func dials(addr string) bool {
+	c, err := net.DialTimeout("tcp", addr, time.Second)
+	if err != nil {
+		return false
+	}
+	_ = c.Close()
+	return true
+}
+
+func TestSshUpBadArgs(t *testing.T) {
+	t.Parallel()
+	for _, args := range [][]string{{"ssh-up"}, {"ssh-up", "--nope"}, {"ssh-up", "extra"}} {
+		out, err := exec.Command(binPath, args...).Output()
+		if code := exitCode(err); code != 1 || strings.TrimSpace(string(out)) !=
+			`{"error":"bad_spec"}` {
+			t.Errorf("bugnet-run %v printed %q and exited %d", args, out, code)
+		}
+	}
 }

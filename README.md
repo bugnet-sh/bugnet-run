@@ -150,6 +150,55 @@ with the same spec changes no file and keeps the same forwarder.
 `egress.json` holds `endpoint`, `ips`, `port`, `listen`, `token_file`, `hosts` and `roots_file`.
 Its paths are sandbox paths, mapped through `--root`.
 
+`ssh-up --spec FILE [--root DIR] [--new-host-key]` makes our sshd ready behind the gate's SSH
+path. It reads the spec and deletes it, even when another argument is wrong:
+
+```json
+{"v": 1, "user": "boxd", "ports": [22, 2022], "sshd_path": "/usr/sbin/sshd", "install": true,
+ "install_timeout_s": 120, "authorize": ["restrict,pty,... ssh-ed25519 AAAA... bn-gw"]}
+```
+
+Then, in this order:
+
+1. When `sshd_path` is not an executable file and `install` is true, it runs `apt-get update` and
+   `apt-get install -y --no-install-recommends openssh-server`, with `DEBIAN_FRONTEND` set to
+   `noninteractive`, within `install_timeout_s` for both. If the install started a distro sshd,
+   it is stopped and disabled. This step runs outside the sandbox lock, and never under `--root`.
+2. It keeps the port of our running sshd. Otherwise it binds `127.0.0.1` on each of `ports` in
+   turn for a moment, takes the first that binds, and writes it to `/etc/bugnet/ssh/port`.
+3. It generates `/etc/bugnet/ssh/host_ed25519_key` (0600) unless a readable one exists.
+   `--new-host-key` always makes a new one.
+4. It adds each `authorize` line to `/etc/bugnet/ssh/authorized_keys` (0644) unless it is there.
+   Other lines are kept.
+5. If the user's password field in `/etc/shadow` starts with `!`, it runs `usermod -p '*'`, since
+   sshd without PAM refuses a locked account. Never under `--root`.
+6. It creates `/run/sshd` and `/run/bugnet` (0755).
+7. It writes `/etc/bugnet/ssh/sshd_config` and records `sshd_path` in `/etc/bugnet/ssh/sshd_path`.
+   A new config is first checked with `sshd -t`. Then it starts our sshd under systemd or
+   `setsid`. A running sshd gets `SIGHUP` when its config or host key changed, and a restart when
+   `sshd_path` changed.
+8. It waits up to 10 s for `127.0.0.1:<port>` to accept.
+
+It prints `{"port":22,"host_key":"ssh-ed25519 AAAA..."}` and exits 0. A second run with the same
+spec changes no file and keeps the same sshd. On an error it prints one of these and exits 1:
+
+| Error | Cause |
+|---|---|
+| `bad_spec` | The spec is missing, malformed or fails a check |
+| `ports_taken` | Every port in `ports` is taken |
+| `install_failed` | `apt-get` failed or ran past `install_timeout_s` |
+| `sshd_missing` | `sshd_path` is not executable, and no install was allowed or it left none |
+| `sshd_failed` | A file was not written, `sshd -t` refused the config, or sshd did not listen |
+
+`user` must be a plain account name. `ports` holds 1 to 4 ports. `sshd_path` must be a clean
+absolute path whose file name holds `sshd`, since respawn knows our sshd by that word in its
+command line. `authorize` holds at most 16 single lines.
+
+Our `sshd_config` has no `Include`. It listens on `127.0.0.1` only, lets in `user` alone, by key
+alone, with `UsePAM no`, and allows only local forwarding to loopback. Its one `SetEnv` line holds
+the lines of `/etc/bugnet/env` and then `/etc/bugnet/secrets.env`, and `egress apply` keeps it
+current. Under `--root`, its paths are mapped under the root.
+
 `respawn [--root DIR]` starts the gate, the forwarder or our sshd when its config exists and its
 process is gone. It prints `{"started":["gate"]}`.
 
@@ -158,6 +207,10 @@ process is gone. It prints `{"started":["gate"]}`.
 | `bugnet-gate` | `/etc/bugnet/gate.json` | `/run/bugnet/gate.pid` |
 | `bugnet-forward` | `/etc/bugnet/egress.json` | `/run/bugnet/forward.pid` |
 | `bugnet-sshd` | `/etc/bugnet/ssh/sshd_config` | `/run/bugnet/sshd.pid` |
+
+Our sshd runs `<sshd_path> -D -e -f /etc/bugnet/ssh/sshd_config`, where `sshd_path` is the one
+`ssh-up` recorded, else `/usr/sbin/sshd`. sshd writes its own pid file. Respawn first makes
+`/run/sshd` and `/run/bugnet`, which a boot empties.
 
 Under systemd each is a unit in `/etc/systemd/system` with `Restart=always`,
 `RuntimeDirectory=bugnet` and `RuntimeDirectoryPreserve=yes`. Units start from the runner's own

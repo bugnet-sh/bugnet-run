@@ -136,12 +136,18 @@ func (s Supervisor) Dead() []Service {
 	return dead
 }
 
+// Prepare makes what the service needs before it starts, such as sshd's run directories
+func (s Supervisor) Prepare(svc Service) error {
+	if svc.prepare == nil {
+		return nil
+	}
+	return svc.prepare(s.Root)
+}
+
 // Start makes sure the service runs, leaving a running one alone
 func (s Supervisor) Start(ctx context.Context, svc Service) error {
-	if svc.prepare != nil {
-		if err := svc.prepare(s.Root); err != nil {
-			return err
-		}
+	if err := s.Prepare(svc); err != nil {
+		return err
 	}
 	if s.Init() == InitSystemd {
 		return s.systemd(ctx, svc, "start")
@@ -155,10 +161,8 @@ func (s Supervisor) Start(ctx context.Context, svc Service) error {
 
 // Restart stops the service if it runs and starts it again
 func (s Supervisor) Restart(ctx context.Context, svc Service) error {
-	if svc.prepare != nil {
-		if err := svc.prepare(s.Root); err != nil {
-			return err
-		}
+	if err := s.Prepare(svc); err != nil {
+		return err
 	}
 	if s.Init() == InitSystemd {
 		return s.systemd(ctx, svc, "restart")
@@ -302,6 +306,11 @@ func systemdQuote(s string) string {
 	}
 	r := strings.NewReplacer(`\`, `\\`, `"`, `\"`, "%", "%%", "$", "$$")
 	return `"` + r.Replace(s) + `"`
+}
+
+// RunSystemctl runs systemctl with args, through the Systemctl field when it is set
+func (s Supervisor) RunSystemctl(ctx context.Context, args ...string) error {
+	return s.systemctl(ctx, args...)
 }
 
 func (s Supervisor) systemctl(ctx context.Context, args ...string) error {

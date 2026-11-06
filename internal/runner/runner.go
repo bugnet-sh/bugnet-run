@@ -17,6 +17,7 @@ import (
 	"github.com/oynozan/bugnet-run/internal/egress"
 	"github.com/oynozan/bugnet-run/internal/gate"
 	"github.com/oynozan/bugnet-run/internal/setup"
+	"github.com/oynozan/bugnet-run/internal/sshup"
 )
 
 const defaultDir = "/tmp/bugnet/jobs"
@@ -77,6 +78,8 @@ func Run(args []string, stdout, stderr io.Writer) int {
 		return badArgs(stdout, stderr, errors.New("egress takes the subcommand apply"))
 	case "forward":
 		return egress.Forward(rest, stderr)
+	case "ssh-up":
+		return sshup.Run(rest, stdout, stderr)
 	case "ping":
 		if err := frame.Encode(stdout, frame.Frame{Kind: frame.KindPong}); err != nil {
 			return failed(stderr, err)
