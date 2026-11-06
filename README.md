@@ -29,7 +29,8 @@ setting applies. Both files are read at every job start. Each holds `KEY=VALUE` 
 shell expansion. A line whose name fails `^[A-Za-z_][A-Za-z0-9_]*$` is skipped.
 
 Before each job, `start` runs `respawn`: directly as root, or as `sudo -n bugnet-run respawn`
-otherwise. It calls sudo only when a service is down. A failed respawn never fails the job.
+otherwise. It calls sudo only when a service is down or the firewall is due its check. A failed
+respawn never fails the job.
 
 ### Job peaks
 
@@ -292,6 +293,13 @@ one of these and exits 1:
 
 `respawn [--root DIR]` starts the gate, the forwarder or our sshd when its config exists and its
 process is gone. It prints `{"started":["gate"]}`.
+
+It also puts the firewall back. When `/etc/bugnet/firewall.rules` exists and the last check is a
+minute old or more, it checks that the table is loaded: `nft list tables` shows `table inet
+bugnet`, or `iptables -w -C OUTPUT -j BUGNET` and its IPv6 twin pass. When the table is gone it
+loads the file again, and `started` holds `firewall`. Each check touches
+`/run/bugnet/firewall.checked`, as `harden` does, so `start` calls sudo for it at most once a
+minute. Root can still remove the table between jobs.
 
 | Service | Config | Pid file |
 |---|---|---|

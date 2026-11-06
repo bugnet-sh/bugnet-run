@@ -10,8 +10,12 @@ import (
 	"os/exec"
 	"time"
 
+	"github.com/oynozan/bugnet-run/internal/harden"
 	"github.com/oynozan/bugnet-run/internal/sandbox"
 )
+
+// firewallName stands in respawn's started list for a firewall table loaded again
+const firewallName = "firewall"
 
 // Variables so tests can take the sudo path and stand in for sudo
 var (
@@ -61,10 +65,15 @@ func respawn(args []string, stdout, stderr io.Writer) int {
 	return status
 }
 
+// needed reports whether a service is down or the firewall table is due a check
+func needed(root sandbox.Root) bool {
+	return len((sandbox.Supervisor{Root: root}).Dead()) > 0 || harden.Due(root, time.Now())
+}
+
 // respawnServices starts each dead service, leaving the round to a setup that holds the sandbox
 func respawnServices(ctx context.Context, root sandbox.Root, exe string) ([]string, error) {
 	sup := sandbox.Supervisor{Root: root, Exe: exe}
-	if len(sup.Dead()) == 0 {
+	if !needed(root) {
 		return nil, nil
 	}
 	unlock, ok, err := sandbox.TryLock(root)
@@ -74,6 +83,15 @@ func respawnServices(ctx context.Context, root sandbox.Root, exe string) ([]stri
 	defer unlock()
 	var started []string
 	var errs []error
+	if harden.Due(root, time.Now()) {
+		reloaded, err := harden.Recheck(ctx, root, time.Now())
+		switch {
+		case err != nil:
+			errs = append(errs, fmt.Errorf("reload the firewall: %w", err))
+		case reloaded:
+			started = append(started, firewallName)
+		}
+	}
 	for _, svc := range sup.Dead() {
 		if err := sup.Start(ctx, svc); err != nil {
 			errs = append(errs, fmt.Errorf("start %s: %w", svc.Name, err))
@@ -84,9 +102,9 @@ func respawnServices(ctx context.Context, root sandbox.Root, exe string) ([]stri
 	return started, errors.Join(errs...)
 }
 
-// respawnBeforeJob brings back dead services as root, through sudo when start runs as another user
+// respawnBeforeJob brings back dead services and the firewall as root, through sudo if need be
 func respawnBeforeJob(root sandbox.Root) {
-	if len((sandbox.Supervisor{Root: root}).Dead()) == 0 {
+	if !needed(root) {
 		return
 	}
 	exe, err := os.Executable()

@@ -72,6 +72,8 @@ type sudoSandbox struct {
 	addr   string
 	jobs   string
 	killed map[int]bool
+	// env is added to the environment of every run
+	env []string
 }
 
 func newSudoSandbox(t *testing.T) *sudoSandbox {
@@ -130,7 +132,7 @@ func (s *sudoSandbox) run(t *testing.T, sudo, timeout string, args ...string) ([
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, s.exe, args...)
-	cmd.Env = append(os.Environ(), sudoEnv+"="+sudo, timeoutEnv+"="+timeout)
+	cmd.Env = append(append(os.Environ(), sudoEnv+"="+sudo, timeoutEnv+"="+timeout), s.env...)
 	var out, errOut bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &out, &errOut
 	if err := cmd.Run(); err != nil {
@@ -253,6 +255,36 @@ func TestSudoFailureNeverFailsTheJob(t *testing.T) {
 		t.Fatalf("start took %v behind a sudo that hangs, want the respawn timeout to end it", took)
 	}
 	same(t, recorded(t, hanging), want)
+}
+
+func TestStartChecksTheFirewallThroughSudo(t *testing.T) {
+	t.Parallel()
+	s := newSudoSandbox(t)
+	rules := s.root.Path("/etc/bugnet/firewall.rules")
+	if err := os.WriteFile(rules, []byte("# bugnet-run harden nft\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	nftDir := t.TempDir()
+	script := "#!/bin/sh\necho \"$*\" >> \"$0.calls\"\n"
+	if err := os.WriteFile(filepath.Join(nftDir, "nft"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	s.env = []string{"PATH=" + nftDir + ":" + os.Getenv("PATH")}
+	want := []string{"-n", s.exe, "respawn", "--root", s.root.Dir()}
+
+	sudo := s.sudo(t, "sudo", "shift\nexec \"$@\"\n")
+	s.start(t, sudo, "", "checked")
+	same(t, recorded(t, sudo), want)
+	calls, err := os.ReadFile(filepath.Join(nftDir, "nft.calls"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	same(t, string(calls), "list tables\n-f "+rules+"\n")
+
+	// Within the minute a healthy sandbox needs no sudo
+	again := s.sudo(t, "sudo", "shift\nexec \"$@\"\n")
+	s.start(t, again, "", "unchecked")
+	same(t, recorded(t, again), []string(nil))
 }
 
 func gone(pid int) bool {

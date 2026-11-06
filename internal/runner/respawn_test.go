@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"syscall"
@@ -382,5 +383,85 @@ func TestTransferHelpersAreSubcommands(t *testing.T) {
 			`{"error":"bad_args"}` {
 			t.Errorf("bugnet-run %v printed %q and exited %d", args, out, code)
 		}
+	}
+}
+
+// fakeNft puts an nft on PATH that records its arguments and lists tables without bugnet's
+func fakeNft(t *testing.T) (string, func() []string) {
+	t.Helper()
+	dir := t.TempDir()
+	script := "#!/bin/sh\necho \"$*\" >> \"$0.calls\"\n" +
+		"if [ \"$1\" = list ]; then echo 'table ip filter'; fi\n"
+	if err := os.WriteFile(filepath.Join(dir, "nft"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	calls := func() []string {
+		b, err := os.ReadFile(filepath.Join(dir, "nft.calls"))
+		if err != nil {
+			return nil
+		}
+		return strings.Split(strings.TrimSuffix(string(b), "\n"), "\n")
+	}
+	return "PATH=" + dir + ":" + os.Getenv("PATH"), calls
+}
+
+func keptRuleset(t *testing.T) sandbox.Root {
+	t.Helper()
+	root, err := sandbox.NewRoot(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := root.Path("/etc/bugnet/firewall.rules")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	rules := "# bugnet-run harden nft\ntable inet bugnet\ndelete table inet bugnet\n"
+	if err := os.WriteFile(path, []byte(rules), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return root
+}
+
+func TestStartReloadsAMissingFirewallOnceAMinute(t *testing.T) {
+	t.Parallel()
+	root := keptRuleset(t)
+	path, calls := fakeNft(t)
+	env := []string{path}
+	startJob(t, t.TempDir(), "first", env, "--root", root.Dir(), "--", "true").collect(t, 0, 0).
+		mustExit(t)
+	sameAs(t, calls(), []string{"list tables", "-f " + root.Path("/etc/bugnet/firewall.rules")})
+
+	startJob(t, t.TempDir(), "second", env, "--root", root.Dir(), "--", "true").collect(t, 0, 0).
+		mustExit(t)
+	sameAs(t, len(calls()), 2)
+
+	// A check a minute old is due again
+	old := time.Now().Add(-61 * time.Second)
+	if err := os.Chtimes(root.Path("/run/bugnet/firewall.checked"), old, old); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(binPath, "respawn", "--root", root.Dir())
+	cmd.Env = append(os.Environ(), path)
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	eq(t, strings.TrimSpace(string(out)), `{"started":["firewall"]}`)
+	sameAs(t, len(calls()), 4)
+}
+
+func TestRespawnWithoutRulesNeverRunsNft(t *testing.T) {
+	t.Parallel()
+	root, _ := setupGate(t)
+	path, calls := fakeNft(t)
+	startJob(t, t.TempDir(), "job", []string{path}, "--root", root.Dir(), "--", "true").
+		collect(t, 0, 0).mustExit(t)
+	sameAs(t, calls(), []string(nil))
+}
+
+func sameAs[T any](t *testing.T, got, want T) {
+	t.Helper()
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("got %#v, want %#v", got, want)
 	}
 }
