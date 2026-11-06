@@ -414,11 +414,13 @@ func (a applier) writeGit(placeholder string) error {
 		}
 		return sandbox.SetBlock(gitconfig, "", 0o644)
 	}
-	line := "https://x-access-token:" + placeholder + "@github.com\n"
-	if _, err := sandbox.WriteFile(creds, []byte(line), 0o644); err != nil {
+	login := "username=x-access-token\npassword=" + placeholder + "\n"
+	if _, err := sandbox.WriteFile(creds, []byte(login), 0o644); err != nil {
 		return err
 	}
-	block := "[credential \"https://github.com\"]\n\thelper = store --file=" + creds + "\n"
+	// The helper answers get alone, so git never rewrites or erases the placeholder after a login
+	helper := `"!f() { test \"$1\" = get && cat ` + creds + `; }; f"`
+	block := "[credential \"https://github.com\"]\n\thelper = " + helper + "\n"
 	return sandbox.SetBlock(gitconfig, block, 0o644)
 }
 

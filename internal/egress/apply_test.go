@@ -155,14 +155,25 @@ func TestApplyGitAndNpmPresets(t *testing.T) {
 	applyFake(t, root, s)
 
 	creds := root.Path(sandbox.GitCredentials)
-	eq(t, readFile(t, creds), "https://x-access-token:"+ghPlaceholder+"@github.com\n")
+	login := "username=x-access-token\npassword=" + ghPlaceholder + "\n"
+	eq(t, readFile(t, creds), login)
 	eq(t, mode(t, creds), os.FileMode(0o644))
 	eq(t, readFile(t, root.Path(sandbox.GitConfig)), "[user]\n\tname = someone\n# bugnet begin\n"+
-		"[credential \"https://github.com\"]\n\thelper = store --file="+creds+"\n# bugnet end\n")
+		"[credential \"https://github.com\"]\n\thelper = \"!f() { test \\\"$1\\\" = get && cat "+
+		creds+"; }; f\"\n# bugnet end\n")
 	eq(t, readFile(t, home+"/.npmrc"), "registry=https://registry.example/\n# bugnet begin\n"+
 		"//registry.npmjs.org/:_authToken="+npmPlaceholder+"\n# bugnet end\n")
 	if _, err := exec.LookPath("git"); err == nil {
-		eq(t, gitPassword(t, root), ghPlaceholder)
+		eq(t, gitLogin(t, root), []string{"x-access-token", ghPlaceholder})
+		// git hands back each login it used or that failed, where a non-root user cannot write
+		dir := filepath.Dir(creds)
+		must(t, os.Chmod(dir, 0o555))
+		t.Cleanup(func() { _ = os.Chmod(dir, 0o755) })
+		used := "protocol=https\nhost=github.com\nusername=x-access-token\npassword="
+		eq(t, gitCredential(t, root, "approve", used+npmPlaceholder+"\n\n"), "")
+		eq(t, gitCredential(t, root, "reject", used+ghPlaceholder+"\n\n"), "")
+		eq(t, readFile(t, creds), login)
+		must(t, os.Chmod(dir, 0o755))
 	}
 
 	applyFake(t, root, spec("huggingface.co"))
@@ -570,23 +581,32 @@ func mode(t *testing.T, path string) os.FileMode {
 	return info.Mode().Perm()
 }
 
-// gitPassword asks git which password the system config's helper gives github.com
-func gitPassword(t *testing.T, root sandbox.Root) string {
+// gitLogin asks git which username and password the system config's helper gives github.com
+func gitLogin(t *testing.T, root sandbox.Root) []string {
 	t.Helper()
-	cmd := exec.Command("git", "credential", "fill")
+	out := gitCredential(t, root, "fill", "protocol=https\nhost=github.com\n\n")
+	fields := map[string]string{}
+	for line := range strings.Lines(out) {
+		if k, v, ok := strings.Cut(strings.TrimSpace(line), "="); ok {
+			fields[k] = v
+		}
+	}
+	return []string{fields["username"], fields["password"]}
+}
+
+// gitCredential runs git credential with only the system config under root, returning its output
+func gitCredential(t *testing.T, root sandbox.Root, action, input string) string {
+	t.Helper()
+	cmd := exec.Command("git", "credential", action)
 	cmd.Env = []string{"GIT_CONFIG_SYSTEM=" + root.Path(sandbox.GitConfig),
 		"GIT_CONFIG_GLOBAL=/dev/null", "HOME=" + t.TempDir(), "GIT_TERMINAL_PROMPT=0",
 		"PATH=" + os.Getenv("PATH")}
-	cmd.Stdin = strings.NewReader("protocol=https\nhost=github.com\n\n")
-	out, err := cmd.Output()
-	must(t, err)
-	for line := range strings.Lines(string(out)) {
-		if v, ok := strings.CutPrefix(strings.TrimSpace(line), "password="); ok {
-			return v
-		}
+	cmd.Stdin = strings.NewReader(input)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git credential %s: %v: %s", action, err, out)
 	}
-	t.Fatalf("git credential fill printed %q", out)
-	return ""
+	return string(out)
 }
 
 // fakeSSHD starts a process named sshd and records it in our sshd's pid file

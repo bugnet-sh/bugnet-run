@@ -101,9 +101,11 @@ reads the spec and deletes it, even when another argument is wrong. Then, in thi
 6. Writes `/etc/bugnet/secrets.env` (0644) and `/etc/profile.d/bugnet.sh`. When our
    `sshd_config` exists, its one `SetEnv` line is rewritten, and our sshd gets `SIGHUP` if it
    changed.
-7. Writes the presets. With `git_placeholder`, `/etc/bugnet/git-credentials` (0644) holds
-   `https://x-access-token:<placeholder>@github.com` and a block in `/etc/gitconfig` sets
-   `credential.https://github.com.helper` to `store --file=/etc/bugnet/git-credentials`. With
+7. Writes the presets. With `git_placeholder`, `/etc/bugnet/git-credentials` (0644) holds the
+   lines `username=x-access-token` and `password=<placeholder>`. A block in `/etc/gitconfig` sets
+   `credential.https://github.com.helper` to
+   `!f() { test "$1" = get && cat /etc/bugnet/git-credentials; }; f`. It answers `get` and
+   ignores `store` and `erase`, so git never rewrites or erases the file after a login. With
    `npm_placeholder`, a block in `<home>/.npmrc` sets `//registry.npmjs.org/:_authToken`. A new
    `.npmrc` is 0600 and owned by the home's owner. A linked `.npmrc` is left alone. An empty
    placeholder removes its preset.
