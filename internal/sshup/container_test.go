@@ -203,15 +203,26 @@ func sessionEnv(t *testing.T, id string, res Result) map[string]string {
 	return env
 }
 
-// scanKey returns the ed25519 host key sshd serves on port, empty when nothing answers
-func scanKey(id string, port int) string {
-	out, _ := exec.Command("docker", "exec", id, "sh", "-c", "ssh-keyscan -t ed25519 -p "+
-		strconv.Itoa(port)+" 127.0.0.1 2>/dev/null").Output()
-	fields := strings.Fields(string(out))
-	if len(fields) < 3 {
-		return ""
+// newKeyThenScan runs ssh-up with --new-host-key and, in the same shell, scans the key on port
+func newKeyThenScan(t *testing.T, id string, s Spec, port int) (Result, string) {
+	t.Helper()
+	b, err := json.Marshal(s)
+	must(t, err)
+	out := docker(t, b, "exec", "-i", id, "sh", "-c", "umask 077 && mkdir -p /tmp/bugnet && "+
+		"cat > /tmp/bugnet/ssh-spec.json && "+
+		"bugnet-run ssh-up --spec /tmp/bugnet/ssh-spec.json --new-host-key 2>/dev/null && "+
+		"ssh-keyscan -t ed25519 -p "+strconv.Itoa(port)+" 127.0.0.1 2>/dev/null; true")
+	line, scan, _ := strings.Cut(out, "\n")
+	var res Result
+	must(t, json.Unmarshal([]byte(line), &res))
+	if res.Error != "" {
+		t.Fatalf("ssh-up printed %s", line)
 	}
-	return strings.Join(fields[1:3], " ")
+	fields := strings.Fields(scan)
+	if len(fields) < 3 {
+		return res, ""
+	}
+	return res, strings.Join(fields[1:3], " ")
 }
 
 func containerSpec(user string) Spec {
@@ -288,8 +299,9 @@ func TestContainerSshUpInstallsOnEmptyLists(t *testing.T) {
 				"authorized_keys\nhost_ed25519_key\nport\nsshd_config\nsshd_path")
 			// ssh-up prints once sshd listens again after its SIGHUP, so a scan right after works
 			for range 20 {
-				fresh = mustUp(t, id, s, "--new-host-key")
-				eq(t, scanKey(id, fresh.Port), fresh.HostKey)
+				var served string
+				fresh, served = newKeyThenScan(t, id, s, fresh.Port)
+				eq(t, served, fresh.HostKey)
 			}
 			eq(t, login(t, id, "root", fresh, "id -un"), "root")
 		})
