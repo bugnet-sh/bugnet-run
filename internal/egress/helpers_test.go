@@ -66,6 +66,8 @@ func runTests(m *testing.M) int {
 		fmt.Fprintf(os.Stderr, "build bugnet-run: %v\n%s", err, out)
 		return 1
 	}
+	// One run pays macOS's check of a new binary, which can take seconds, before a test times it
+	_ = exec.Command(binPath).Run()
 	executable = func() (string, error) { return binPath, nil }
 	rootsForTests = rootsFile
 	return m.Run()
