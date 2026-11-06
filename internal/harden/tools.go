@@ -24,7 +24,13 @@ type tools struct {
 	install func(ctx context.Context) error
 }
 
-var systemTools = tools{look: lookTool, run: runTool, install: installNftables}
+var systemTools = tools{look: lookTool, run: runTool, install: func(ctx context.Context) error {
+	apt, ok := lookTool("apt-get")
+	if !ok {
+		return errors.New("neither nft, iptables-restore nor apt-get is installed")
+	}
+	return installNftables(ctx, apt, installTimeout)
+}}
 
 // ensureTool installs nftables only where neither nft nor iptables-restore exists
 func (h hardener) ensureTool(ctx context.Context) error {
@@ -225,16 +231,12 @@ func runTool(ctx context.Context, stdin []byte, path string, args ...string) ([]
 	return out, nil
 }
 
-// installNftables runs apt-get as ssh-up does, both steps within installTimeout
-func installNftables(ctx context.Context) error {
-	apt, ok := lookTool("apt-get")
-	if !ok {
-		return errors.New("neither nft, iptables-restore nor apt-get is installed")
-	}
-	ctx, cancel := context.WithTimeout(ctx, installTimeout)
+// installNftables runs apt-get as ssh-up does, both steps within one timeout
+func installNftables(ctx context.Context, apt string, timeout time.Duration) error {
+	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	opts := []string{
-		"-o", "DPkg::Lock::Timeout=" + strconv.Itoa(int(installTimeout.Seconds())),
+		"-o", "DPkg::Lock::Timeout=" + strconv.Itoa(int(timeout.Seconds())),
 		"-o", "Dpkg::Options::=--force-confdef", "-o", "Dpkg::Options::=--force-confold",
 	}
 	for _, args := range [][]string{

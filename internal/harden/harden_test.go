@@ -1,6 +1,7 @@
 package harden
 
 import (
+	"context"
 	"errors"
 	"os"
 	"strings"
@@ -314,6 +315,37 @@ func TestHardenInstallsNftablesWithNeither(t *testing.T) {
 	f.h.tools = f.fakes.tools()
 	eq(t, f.run(t), `{"firewall":"nft"}`)
 	eq(t, names(f.fakes.take()), []string{"apt-get install", "nft -f FILE"})
+}
+
+func TestInstallNftablesRunsAptGet(t *testing.T) {
+	t.Parallel()
+	apt := fakeApt(t)
+	must(t, installNftables(context.Background(), apt.path, installTimeout))
+	opts := "-o DPkg::Lock::Timeout=60 -o Dpkg::Options::=--force-confdef " +
+		"-o Dpkg::Options::=--force-confold "
+	env := "DEBIAN_FRONTEND=noninteractive "
+	eq(t, apt.calls(t), env+opts+"update\n"+
+		env+opts+"install -y --no-install-recommends nftables\n")
+
+	apt.exit(t, 100)
+	err := installNftables(context.Background(), apt.path, installTimeout)
+	eq(t, err != nil, true)
+	eq(t, strings.Contains(err.Error(), "apt-get update: exit status 100: E: The repository"),
+		true)
+	eq(t, strings.Count(apt.calls(t), "\n"), 1)
+}
+
+func TestInstallTimeoutCoversBothCommands(t *testing.T) {
+	t.Parallel()
+	apt := fakeApt(t)
+	// Each command alone fits the timeout
+	for _, sleeps := range [][2]string{{"1.8", "0"}, {"0", "1.8"}} {
+		apt.sleep(t, sleeps[0], sleeps[1])
+		must(t, installNftables(context.Background(), apt.path, 3*time.Second))
+	}
+	apt.sleep(t, "1.8", "1.8")
+	err := installNftables(context.Background(), apt.path, 3*time.Second)
+	eq(t, err != nil && strings.Contains(err.Error(), "apt-get install"), true)
 }
 
 func TestFirewallUnavailable(t *testing.T) {
