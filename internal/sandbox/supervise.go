@@ -58,10 +58,26 @@ var Forward = Service{
 // SSHD is the sandbox's own sshd behind the gate's SSH path
 var SSHD = Service{
 	Name: "sshd", Config: SSHDConfig, description: "Bugnet sshd", runtimeDirs: "bugnet sshd",
-	killProcess: true, marker: "sshd", prepare: makeSSHDRunDir,
+	killProcess: true, marker: "sshd", prepare: makeSSHDRunDirs,
 	argv: func(r Root, _ string) []string {
-		return []string{"/usr/sbin/sshd", "-D", "-e", "-f", r.Path(SSHDConfig)}
+		return []string{SSHDPath(r), "-D", "-e", "-f", r.Path(SSHDConfig)}
 	},
+}
+
+// DefaultSSHDPath is the sshd Debian and Ubuntu install
+const DefaultSSHDPath = "/usr/sbin/sshd"
+
+// SSHDPath returns the sshd ssh-up recorded, the default when the record is missing or unclean
+func SSHDPath(r Root) string {
+	b, err := os.ReadFile(r.Path(SSHDPathFile))
+	if err != nil {
+		return DefaultSSHDPath
+	}
+	p := strings.TrimSuffix(string(b), "\n")
+	if !filepath.IsAbs(p) || filepath.Clean(p) != p || strings.ContainsAny(p, "\x00\r\n") {
+		return DefaultSSHDPath
+	}
+	return p
 }
 
 // Services lists every service respawn brings back, in start order
@@ -73,13 +89,17 @@ func runnerArgv(sub, config string) func(Root, string) []string {
 	}
 }
 
-// makeSSHDRunDir creates sshd's privilege separation directory, which a boot empties
-func makeSSHDRunDir(r Root) error {
-	dir := r.Path(SSHDRunDir)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return err
+// makeSSHDRunDirs creates the privilege separation and pid file directories a boot empties
+func makeSSHDRunDirs(r Root) error {
+	for _, dir := range []string{r.Path(SSHDRunDir), r.Path(RunDir)} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return err
+		}
+		if err := os.Chmod(dir, 0o755); err != nil {
+			return err
+		}
 	}
-	return os.Chmod(dir, 0o755)
+	return nil
 }
 
 // Supervisor runs services under systemd where the sandbox boots it, else each in its own session
@@ -153,7 +173,27 @@ func (s Supervisor) Restart(ctx context.Context, svc Service) error {
 // Signal sends sig to the service's running process, reporting whether one was running
 func (s Supervisor) Signal(svc Service, sig syscall.Signal) (bool, error) {
 	pid, err := ReadPidFile(s.Root, svc.Name)
-	if err != nil || !alive(pid, svc.marker) {
+	if err != nil {
+		return false, nil
+	}
+	return signal(pid, svc.marker, sig)
+}
+
+// SignalPidFile sends sig to the process a pid file names while its command line holds marker
+func SignalPidFile(path, marker string, sig syscall.Signal) (bool, error) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return false, nil
+	}
+	pid, err := parsePid(b)
+	if err != nil {
+		return false, nil
+	}
+	return signal(pid, marker, sig)
+}
+
+func signal(pid int, marker string, sig syscall.Signal) (bool, error) {
+	if !alive(pid, marker) {
 		return false, nil
 	}
 	if err := syscall.Kill(pid, sig); err != nil {
@@ -311,7 +351,7 @@ func CloseInherited() {
 /* Pid files */
 
 func pidPath(r Root, name string) string {
-	return filepath.Join(r.Path(RunDir), name+".pid")
+	return r.Path(PidFile(name))
 }
 
 // WritePidFile records pid as the process of the named service
@@ -333,10 +373,24 @@ func ReadPidFile(r Root, name string) (int, error) {
 	if err != nil {
 		return 0, err
 	}
+	pid, err := parsePid(b)
+	if err != nil {
+		return 0, fmt.Errorf("pid file of %s: %w", name, err)
+	}
+	return pid, nil
+}
+
+// PidFile returns the sandbox path of the named service's pid file
+func PidFile(name string) string {
+	return RunDir + "/" + name + ".pid"
+}
+
+// parsePid accepts only plain decimals above 1 that fit a pid, so kill never sees 0 or -1
+func parsePid(b []byte) (int, error) {
 	s := strings.TrimSpace(string(b))
 	pid, err := strconv.ParseInt(s, 10, 32)
 	if err != nil || pid <= 1 || strings.TrimLeft(s, "0123456789") != "" {
-		return 0, fmt.Errorf("pid file of %s holds %q", name, s)
+		return 0, fmt.Errorf("holds %q", s)
 	}
 	return int(pid), nil
 }

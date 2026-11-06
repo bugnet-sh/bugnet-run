@@ -230,3 +230,62 @@ func TestSignalReachesOnlyARunningService(t *testing.T) {
 	must(t, err)
 	eq(t, sent, false)
 }
+
+func TestSSHDRunsTheRecordedPath(t *testing.T) {
+	t.Parallel()
+	r := testRoot(t)
+	s := Supervisor{Root: r}
+	cfg := r.Path(SSHDConfig)
+	eq(t, SSHD.argv(r, ""), []string{"/usr/sbin/sshd", "-D", "-e", "-f", cfg})
+
+	writeFile(t, r.Path(SSHDPathFile), "/opt/homebrew/sbin/sshd\n")
+	eq(t, SSHD.argv(r, ""), []string{"/opt/homebrew/sbin/sshd", "-D", "-e", "-f", cfg})
+	eq(t, strings.Contains(s.unit(SSHD), "ExecStart=/opt/homebrew/sbin/sshd -D -e -f "+cfg+"\n"),
+		true)
+
+	for _, bad := range []string{"sshd\n", "\n", "/usr/sbin/../sbin/sshd\n", "/a\n/b\n"} {
+		writeFile(t, r.Path(SSHDPathFile), bad)
+		eq(t, SSHD.argv(r, "")[0], "/usr/sbin/sshd")
+	}
+}
+
+func TestSSHDPrepareMakesBothRunDirs(t *testing.T) {
+	t.Parallel()
+	r := testRoot(t)
+	must(t, SSHD.prepare(r))
+	for _, dir := range []string{SSHDRunDir, RunDir} {
+		info, err := os.Stat(r.Path(dir))
+		must(t, err)
+		eq(t, info.IsDir(), true)
+		eq(t, info.Mode().Perm(), os.FileMode(0o755))
+	}
+}
+
+func TestSignalPidFileChecksTheCommandLine(t *testing.T) {
+	procDir = t.TempDir()
+	t.Cleanup(func() { procDir = "/proc" })
+	dir := t.TempDir()
+	path := filepath.Join(dir, "sshd.pid")
+	sent, err := SignalPidFile(path, "sshd", syscall.SIGTERM)
+	must(t, err)
+	eq(t, sent, false)
+
+	live := exec.Command("sleep", "30")
+	must(t, live.Start())
+	t.Cleanup(func() { _ = live.Process.Kill(); _ = live.Wait() })
+	pid := live.Process.Pid
+	writeFile(t, path, strconv.Itoa(pid)+"\n")
+	writeFile(t, filepath.Join(procDir, strconv.Itoa(pid), "cmdline"), "sleep\x0030\x00")
+	sent, err = SignalPidFile(path, "sshd", syscall.SIGTERM)
+	must(t, err)
+	eq(t, sent, false)
+
+	writeFile(t, filepath.Join(procDir, strconv.Itoa(pid), "cmdline"),
+		"sshd: /usr/sbin/sshd [listener]\x00")
+	sent, err = SignalPidFile(path, "sshd", syscall.SIGTERM)
+	must(t, err)
+	eq(t, sent, true)
+	_ = live.Wait()
+	ws, ok := live.ProcessState.Sys().(syscall.WaitStatus)
+	eq(t, ok && ws.Signaled() && ws.Signal() == syscall.SIGTERM, true)
+}
