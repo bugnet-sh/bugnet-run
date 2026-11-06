@@ -220,3 +220,46 @@ Respawn and setup run `systemctl reset-failed` before they start it again.
 Managed blocks sit between `# bugnet begin` and `# bugnet end`. A rewrite renames a new file over
 the old one. When the rename fails with `EBUSY` or `EXDEV`, as on a bind-mounted `/etc/hosts`,
 it rewrites the file in place under `flock`. Lines outside the block are kept.
+
+## Transfer helpers
+
+The router runs these through `sudo -n` for a staged transfer, where the exec user cannot reach
+the path itself. Each prints one JSON line. Paths must be absolute and are cleaned first, so a
+trailing slash never makes a final symlink count.
+
+`stat --path P` describes `P` with `lstat`, never following a final symlink:
+
+```json
+{"path": "/opt/x", "size": 5, "mode": 420, "modified_unix_nano": 1793955600000000000,
+ "is_dir": false, "regular": true}
+```
+
+`mode` holds the permission bits as a number, 420 for 0644. A FIFO, a device or a symlink has
+`regular` false.
+
+`stage-out --from P --to S --owner USER` copies the regular file `P` to `S` for `USER`:
+
+- It reads exactly the size `P` had when opened, so a file still growing gives a frozen copy.
+- The copy is 0600, owned by `USER` and its primary group, and keeps the modification time of
+  `P`, so its fields match the ETag the router pinned.
+- Missing directories of `S` are made 0700 for `USER`. The copy is written beside `S` and renamed
+  over it.
+- It prints the fields of the copy.
+
+`place --from S --to P [--mode 0644]` moves a staged upload over `P`:
+
+- It creates the missing parents of `P` (0755).
+- The file gets `--mode` and keeps the owner of the file it replaces. A new file belongs to the
+  user running `place`, root under sudo. Modes above 0777 are refused.
+- It renames `S` over `P`. When they sit on different filesystems, it copies `S` beside `P`,
+  renames the copy over `P` and deletes `S`.
+- It prints the fields of the placed file.
+
+| Error | Exit | Cause |
+|---|---|---|
+| `bad_args` | 2 | A missing, relative or unknown argument, an unknown owner or a bad mode |
+| `not_found` | 1 | The path, or `--from`, does not exist |
+| `is_directory` | 1 | The source, or the target of `place`, is a directory |
+| `not_regular` | 1 | The source is a symlink, a FIFO, a device or a socket |
+| `file_changed` | 1 | The source of `stage-out` shrank while it was copied |
+| `stat_failed`, `stage_failed`, `place_failed` | 1 | Any other failure |

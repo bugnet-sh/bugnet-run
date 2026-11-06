@@ -354,3 +354,33 @@ func TestSshUpBadArgs(t *testing.T) {
 		}
 	}
 }
+
+func TestTransferHelpersAreSubcommands(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	file := filepath.Join(dir, "f")
+	if err := os.WriteFile(file, []byte("hello"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	var got struct {
+		Path    string `json:"path"`
+		Size    int64  `json:"size"`
+		Mode    uint32 `json:"mode"`
+		Regular bool   `json:"regular"`
+	}
+	if err := json.Unmarshal(runRaw(t, "stat", "--path", file), &got); err != nil {
+		t.Fatal(err)
+	}
+	eq(t, got.Path, file)
+	eq(t, got.Size, int64(5))
+	eq(t, got.Mode, uint32(0o640))
+	eq(t, got.Regular, true)
+
+	for _, args := range [][]string{{"stat"}, {"stage-out"}, {"place"}} {
+		out, err := exec.Command(binPath, args...).Output()
+		if code := exitCode(err); code != 2 || strings.TrimSpace(string(out)) !=
+			`{"error":"bad_args"}` {
+			t.Errorf("bugnet-run %v printed %q and exited %d", args, out, code)
+		}
+	}
+}

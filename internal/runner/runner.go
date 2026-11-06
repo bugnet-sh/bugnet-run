@@ -18,6 +18,7 @@ import (
 	"github.com/oynozan/bugnet-run/internal/gate"
 	"github.com/oynozan/bugnet-run/internal/setup"
 	"github.com/oynozan/bugnet-run/internal/sshup"
+	"github.com/oynozan/bugnet-run/internal/xfer"
 )
 
 const defaultDir = "/tmp/bugnet/jobs"
@@ -80,6 +81,12 @@ func Run(args []string, stdout, stderr io.Writer) int {
 		return egress.Forward(rest, stderr)
 	case "ssh-up":
 		return sshup.Run(rest, stdout, stderr)
+	case "stat":
+		return xfer.Stat(rest, stdout, stderr)
+	case "stage-out":
+		return xfer.StageOut(rest, stdout, stderr)
+	case "place":
+		return xfer.Place(rest, stdout, stderr)
 	case "ping":
 		if err := frame.Encode(stdout, frame.Frame{Kind: frame.KindPong}); err != nil {
 			return failed(stderr, err)
