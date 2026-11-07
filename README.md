@@ -178,10 +178,10 @@ not `bnsec_` and 26 base32 characters is `bad_spec`. Hosts must be lower-case na
 with the same spec changes no file and keeps the same forwarder.
 
 `x402_hosts` names the hosts of the sandbox's x402 services. Each must also be in `hosts`, and
-none may repeat, or the spec is `bad_spec`. Its two lines keep the spec's order and reach login
-shells, our sshd and every new job, as the placeholder lines do. An empty or absent list writes
-neither line, and a later run without it removes both. `secrets` in the output counts `env`
-alone.
+none may repeat, or the spec is `bad_spec`. `BUGNET_X402_HOSTS` lists the hosts in the spec's
+order. Both lines reach login shells, our sshd and every new job, as the placeholder lines do.
+An empty or absent list writes neither line, and a later run without it removes both. `secrets`
+in the output counts `env` alone.
 
 `forward --config /etc/bugnet/egress.json [--root DIR]` relays raw TLS for secret hosts:
 
