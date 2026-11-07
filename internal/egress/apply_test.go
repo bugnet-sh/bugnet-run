@@ -654,6 +654,17 @@ func TestApplyX402OnlyPlacement(t *testing.T) {
 	eq(t, managedBlock(t, root.Path(sandbox.HostsFile)), "127.77.0.1 agent402.tools\n")
 }
 
+func TestApplyX402HostsKeepTheSpecOrder(t *testing.T) {
+	t.Parallel()
+	root := testRoot(t)
+	s := x402Spec([]string{"agent402.tools", "api.example.com"},
+		"api.example.com", "agent402.tools")
+	s.Env = []EnvVar{}
+	applyWith(t, root, newFakeForwarder(t, root), s)
+	eq(t, readFile(t, root.Path(sandbox.SecretsEnvFile)),
+		"BUGNET_X402=1\nBUGNET_X402_HOSTS=api.example.com,agent402.tools\n")
+}
+
 func TestApplyX402IsIdempotent(t *testing.T) {
 	t.Parallel()
 	root := testRoot(t)
