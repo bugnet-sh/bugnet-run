@@ -193,6 +193,47 @@ func TestContainerApplyOnBindMountedHosts(t *testing.T) {
 	}
 }
 
+func TestContainerApplyX402Hosts(t *testing.T) {
+	needDocker(t)
+	runner := linuxBuild(t, "github.com/oynozan/bugnet-run/cmd/bugnet-run")
+	p := newPKI(t)
+	s := spec("agent402.tools")
+	s.Endpoint, s.IPs, s.Port, s.Home = testEndpoint, []string{"127.0.0.1"}, 9443, "/root"
+	s.Env, s.X402Hosts = []EnvVar{}, []string{"agent402.tools"}
+	with, err := json.Marshal(s)
+	must(t, err)
+	s.Token, s.X402Hosts = "", nil
+	without, err := json.Marshal(s)
+	must(t, err)
+
+	for _, image := range containerImages {
+		t.Run(image, func(t *testing.T) {
+			id := docker(t, nil, "run", "-d", "--rm", "--init", image, "sleep", "600")
+			t.Cleanup(func() { _ = exec.Command("docker", "rm", "-f", id).Run() })
+			docker(t, nil, "cp", runner, id+":/usr/local/bin/bugnet-run")
+			docker(t, p.pem, "exec", "-i", id, "sh", "-c",
+				"mkdir -p /etc/ssl/certs && cat > /etc/ssl/certs/ca-certificates.crt")
+			want := `{"forward":"listening","hosts":1,"secrets":0}`
+			eq(t, containerApply(t, id, with), want)
+			eq(t, strings.Fields(inContainer(t, id, "getent hosts agent402.tools")),
+				[]string{"127.77.0.1", "agent402.tools"})
+			eq(t, loginX402(t, id), "1 agent402.tools")
+
+			eq(t, containerApply(t, id, without), want)
+			eq(t, loginX402(t, id), " ")
+		})
+	}
+}
+
+// loginX402 prints the x402 variables as a login shell with an empty environment sees them
+func loginX402(t *testing.T, id string) string {
+	t.Helper()
+	out, err := exec.Command("docker", "exec", id, "env", "-i", "PATH=/usr/bin:/bin", "bash",
+		"-lc", `printf "%s %s" "$BUGNET_X402" "$BUGNET_X402_HOSTS"`).Output()
+	must(t, err)
+	return string(out)
+}
+
 func waitIn(t *testing.T, id, script string) {
 	t.Helper()
 	deadline := time.Now().Add(10 * time.Second)

@@ -402,6 +402,17 @@ func TestApplyBadSpec(t *testing.T) {
 		"home line break":    func(s *Spec) { s.Home = "/home/boxd\n" },
 		"home not clean":     func(s *Spec) { s.Home = "/home/../etc" },
 		"placeholder breaks": func(s *Spec) { s.Env[0].Value = hfPlaceholder + "\nX=1" },
+		"x402 host not in hosts": func(s *Spec) {
+			s.X402Hosts = []string{"agent402.tools"}
+		},
+		"x402 host repeated": func(s *Spec) {
+			s.Hosts = append(s.Hosts, "agent402.tools")
+			s.X402Hosts = []string{"agent402.tools", "agent402.tools"}
+		},
+		"repeated host with x402": func(s *Spec) {
+			s.Hosts = append(s.Hosts, "agent402.tools", "agent402.tools")
+			s.X402Hosts = []string{"agent402.tools"}
+		},
 	} {
 		s := spec("huggingface.co")
 		change(&s)
@@ -417,6 +428,9 @@ func TestApplyBadSpec(t *testing.T) {
 		"git placeholder": {"ghp_real"}, "npm placeholder": {"bnsec_UPPER"},
 		"relative home": {"home/boxd"}, "home line break": {"/home/boxd"},
 		"home not clean": {"/home/../etc"}, "placeholder breaks": {"X=1"},
+		"x402 host not in hosts":  {"agent402.tools", "huggingface.co"},
+		"x402 host repeated":      {"agent402.tools", "huggingface.co"},
+		"repeated host with x402": {"agent402.tools", "huggingface.co"},
 	}
 	for name, raw := range cases {
 		root := testRoot(t)
@@ -543,6 +557,155 @@ func TestForwarderStartsCopyTheRunnerFirst(t *testing.T) {
 	must(t, fwd.Restart(context.Background()))
 	eq(t, readFile(t, runner), "runner v2\n")
 	eq(t, calls[len(calls)-1], "restart bugnet-forward.service")
+}
+
+/* x402 hosts */
+
+const profileHead = "# Written by bugnet-run from /etc/bugnet/env and /etc/bugnet/secrets.env\n"
+
+// x402Spec is spec with x402 as its x402 hosts
+func x402Spec(hosts []string, x402 ...string) Spec {
+	s := spec(hosts...)
+	s.X402Hosts = x402
+	return s
+}
+
+func TestApplyWritesTheX402Lines(t *testing.T) {
+	t.Parallel()
+	root := testRoot(t)
+	writeFile(t, root.Path(sandbox.SSHDConfig), "Port 22\n")
+	sshd := fakeSSHD(t, root, "")
+	s := x402Spec([]string{"agent402.tools", "api.example.com", "huggingface.co"},
+		"agent402.tools", "api.example.com")
+	out, _ := applyWith(t, root, newFakeForwarder(t, root), s)
+	eq(t, out, `{"forward":"listening","hosts":3,"secrets":1}`)
+	h := "agent402.tools,api.example.com"
+	eq(t, readFile(t, root.Path(sandbox.SecretsEnvFile)),
+		"HF_TOKEN="+hfPlaceholder+"\nBUGNET_X402=1\nBUGNET_X402_HOSTS="+h+"\n")
+	eq(t, readFile(t, root.Path(sandbox.ProfileFile)), profileHead+
+		"export HF_TOKEN='"+hfPlaceholder+"'\nexport BUGNET_X402='1'\n"+
+		"export BUGNET_X402_HOSTS='"+h+"'\n")
+	eq(t, readFile(t, root.Path(sandbox.SSHDConfig)), "Port 22\nSetEnv HF_TOKEN="+hfPlaceholder+
+		" BUGNET_X402=1 BUGNET_X402_HOSTS="+h+"\n")
+	eq(t, sshd.hungUp(t), true)
+	eq(t, managedBlock(t, root.Path(sandbox.HostsFile)),
+		"127.77.0.1 agent402.tools api.example.com huggingface.co\n")
+}
+
+func TestApplyWithoutX402HostsIsUnchanged(t *testing.T) {
+	t.Parallel()
+	b, err := json.Marshal(spec("huggingface.co"))
+	must(t, err)
+	eq(t, strings.Contains(string(b), "x402"), false)
+	empty := strings.TrimSuffix(string(b), "}") + `,"x402_hosts":[]}`
+	files := map[string]map[string]string{}
+	for name, raw := range map[string]string{"absent": string(b), "empty": empty} {
+		root := testRoot(t)
+		writeFile(t, root.Path(sandbox.SSHDConfig), "Port 22\n")
+		path := filepath.Join(t.TempDir(), "egress-spec.json")
+		must(t, os.WriteFile(path, []byte(raw), 0o600))
+		s, err := readSpec(path)
+		must(t, err)
+		applyFake(t, root, s)
+		files[name] = snapshot(t, root)
+		files[name]["sshd_config"] = readFile(t, root.Path(sandbox.SSHDConfig))
+	}
+	eq(t, files["empty"], files["absent"])
+	got := files["absent"]
+	eq(t, got[sandbox.SecretsEnvFile], "-rw-r--r-- HF_TOKEN="+hfPlaceholder+"\n")
+	eq(t, got[sandbox.ProfileFile], "-rw-r--r-- "+profileHead+
+		"export HF_TOKEN='"+hfPlaceholder+"'\n")
+	eq(t, got["sshd_config"], "Port 22\nSetEnv HF_TOKEN="+hfPlaceholder+"\n")
+	eq(t, got[sandbox.HostsFile], "-rw-r--r-- # bugnet begin\n127.77.0.1 huggingface.co\n"+
+		"# bugnet end\n")
+}
+
+func TestApplyX402LinesLeaveWithTheField(t *testing.T) {
+	t.Parallel()
+	root := testRoot(t)
+	writeFile(t, root.Path(sandbox.SSHDConfig), "Port 22\n")
+	s := x402Spec([]string{"agent402.tools", "huggingface.co"}, "agent402.tools")
+	sshd := fakeSSHD(t, root, "")
+	applyFake(t, root, s)
+	eq(t, sshd.hungUp(t), true)
+
+	sshd = fakeSSHD(t, root, "")
+	s.X402Hosts = nil
+	applyFake(t, root, s)
+	eq(t, sshd.hungUp(t), true)
+	eq(t, readFile(t, root.Path(sandbox.SecretsEnvFile)), "HF_TOKEN="+hfPlaceholder+"\n")
+	eq(t, readFile(t, root.Path(sandbox.ProfileFile)), profileHead+
+		"export HF_TOKEN='"+hfPlaceholder+"'\n")
+	eq(t, readFile(t, root.Path(sandbox.SSHDConfig)), "Port 22\nSetEnv HF_TOKEN="+hfPlaceholder+
+		"\n")
+	eq(t, managedBlock(t, root.Path(sandbox.HostsFile)),
+		"127.77.0.1 agent402.tools huggingface.co\n")
+}
+
+func TestApplyX402OnlyPlacement(t *testing.T) {
+	t.Parallel()
+	root := testRoot(t)
+	s := x402Spec([]string{"agent402.tools"}, "agent402.tools")
+	s.Env = []EnvVar{}
+	out, _ := applyWith(t, root, newFakeForwarder(t, root), s)
+	eq(t, out, `{"forward":"listening","hosts":1,"secrets":0}`)
+	eq(t, readFile(t, root.Path(sandbox.SecretsEnvFile)),
+		"BUGNET_X402=1\nBUGNET_X402_HOSTS=agent402.tools\n")
+	eq(t, managedBlock(t, root.Path(sandbox.HostsFile)), "127.77.0.1 agent402.tools\n")
+}
+
+func TestApplyX402IsIdempotent(t *testing.T) {
+	t.Parallel()
+	root := testRoot(t)
+	writeFile(t, root.Path(sandbox.SSHDConfig), "Port 22\n")
+	fwd := newFakeForwarder(t, root)
+	s := x402Spec([]string{"agent402.tools", "huggingface.co"}, "agent402.tools")
+	applyWith(t, root, fwd, s)
+	sshd := fakeSSHD(t, root, "")
+	files := snapshot(t, root)
+	config := readFile(t, root.Path(sandbox.SSHDConfig))
+	fwd.calls = nil
+	out, _ := applyWith(t, root, fwd, s)
+	eq(t, out, `{"forward":"listening","hosts":2,"secrets":1}`)
+	eq(t, fwd.calls, []string{"wait 127.77.0.1:443"})
+	eq(t, snapshot(t, root), files)
+	eq(t, readFile(t, root.Path(sandbox.SSHDConfig)), config)
+	eq(t, sshd.hungUp(t), false)
+}
+
+func TestJobSeesX402Lines(t *testing.T) {
+	t.Parallel()
+	root := testRoot(t)
+	applyFake(t, root, x402Spec([]string{"agent402.tools", "huggingface.co"}, "agent402.tools"))
+	jobs := t.TempDir()
+	must(t, os.Mkdir(filepath.Join(jobs, "x402"), 0o700))
+	cmd := exec.Command(binPath, "supervise", "--job", "x402", "--dir", jobs, "--root",
+		root.Dir(), "--", "env")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("supervise: %v: %s", err, out)
+	}
+	eq(t, readFile(t, filepath.Join(jobs, "x402", "exit")), "0\n")
+	env := "\n" + readFile(t, filepath.Join(jobs, "x402", "out"))
+	eq(t, strings.Contains(env, "\nBUGNET_X402=1\n"), true)
+	eq(t, strings.Contains(env, "\nBUGNET_X402_HOSTS=agent402.tools\n"), true)
+	eq(t, strings.Contains(env, "\nHF_TOKEN="+hfPlaceholder+"\n"), true)
+}
+
+// The router's x402 apply test compares its own marshalled spec with this file
+func TestSpecX402Golden(t *testing.T) {
+	t.Parallel()
+	golden, err := os.ReadFile(filepath.Join("testdata", "spec-x402.json"))
+	must(t, err)
+	path := filepath.Join(t.TempDir(), "egress-spec.json")
+	must(t, os.WriteFile(path, golden, 0o600))
+	got, err := readSpec(path)
+	must(t, err)
+	eq(t, got, x402Spec([]string{"agent402.tools", "api.example.com", "huggingface.co"},
+		"agent402.tools", "api.example.com"))
+	must(t, got.check(testRoot(t)))
+	b, err := json.Marshal(got)
+	must(t, err)
+	eq(t, string(b)+"\n", string(golden))
 }
 
 /* Apply helpers */

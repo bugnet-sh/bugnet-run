@@ -148,11 +148,12 @@ in this order:
 4. Waits up to 5 s for the forwarder's pid file and for the listen address to accept.
 5. Rewrites the `/etc/hosts` block to `127.77.0.1 <host> <host> ...`. Lines stay under 500
    bytes, since musl reads 512 at a time. There is never a `::1` line.
-6. Writes `/etc/bugnet/secrets.env` (0644) and `/etc/profile.d/bugnet.sh`. When our
-   `sshd_config` exists, its one `SetEnv` line is rewritten, and our sshd gets `SIGHUP` if it
-   changed. It then keeps the sandbox lock for up to 10 s, until sshd writes its pid file again,
-   so an `ssh-up` waiting for the lock never finds sshd in the middle of a reload. An sshd that
-   exits instead is left for `respawn`.
+6. Writes `/etc/bugnet/secrets.env` (0644) and `/etc/profile.d/bugnet.sh`. With `x402_hosts`,
+   `secrets.env` ends with `BUGNET_X402=1` and `BUGNET_X402_HOSTS=<x402_hosts joined by commas>`,
+   after the placeholder lines. When our `sshd_config` exists, its one `SetEnv` line is
+   rewritten, and our sshd gets `SIGHUP` if it changed. It then keeps the sandbox lock for up
+   to 10 s, until sshd writes its pid file again, so an `ssh-up` waiting for the lock never finds
+   sshd in the middle of a reload. An sshd that exits instead is left for `respawn`.
 7. Writes the presets. With `git_placeholder`, `/etc/bugnet/git-credentials` (0644) holds the
    lines `username=x-access-token` and `password=<placeholder>`. A block in `/etc/gitconfig` sets
    `credential.https://github.com.helper` to
@@ -175,6 +176,12 @@ of these and exits 1:
 The spec holds placeholders only. An `env` value, `git_placeholder` or `npm_placeholder` that is
 not `bnsec_` and 26 base32 characters is `bad_spec`. Hosts must be lower-case names. A second run
 with the same spec changes no file and keeps the same forwarder.
+
+`x402_hosts` names the hosts of the sandbox's x402 services. Each must also be in `hosts`, and
+none may repeat, or the spec is `bad_spec`. Its two lines keep the spec's order and reach login
+shells, our sshd and every new job, as the placeholder lines do. An empty or absent list writes
+neither line, and a later run without it removes both. `secrets` in the output counts `env`
+alone.
 
 `forward --config /etc/bugnet/egress.json [--root DIR]` relays raw TLS for secret hosts:
 

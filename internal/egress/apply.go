@@ -34,6 +34,8 @@ type Spec struct {
 	Home           string `json:"home"`
 	GitPlaceholder string `json:"git_placeholder"`
 	NPMPlaceholder string `json:"npm_placeholder"`
+	// X402Hosts are the hosts of x402 services, each also in Hosts, omitted when there are none
+	X402Hosts []string `json:"x402_hosts,omitempty"`
 }
 
 // EnvVar is one NAME=placeholder line of secrets.env
@@ -225,7 +227,38 @@ func (s Spec) check(root sandbox.Root) error {
 	if s.NPMPlaceholder != "" && s.Home == "" {
 		return errors.New("npm_placeholder needs home")
 	}
+	return s.checkX402()
+}
+
+func (s Spec) checkX402() error {
+	hosts := map[string]bool{}
+	for _, h := range s.Hosts {
+		hosts[h] = true
+	}
+	seen := map[string]bool{}
+	for i, h := range s.X402Hosts {
+		if !hosts[h] {
+			return fmt.Errorf("x402_hosts[%d] is not in hosts", i)
+		}
+		if seen[h] {
+			return fmt.Errorf("x402_hosts[%d] repeats an earlier name", i)
+		}
+		seen[h] = true
+	}
 	return nil
+}
+
+// envVars are the placeholder lines of secrets.env, then the x402 lines when there are x402 hosts
+func (s Spec) envVars() []sandbox.Var {
+	vars := make([]sandbox.Var, 0, len(s.Env)+2)
+	for _, v := range s.Env {
+		vars = append(vars, sandbox.Var{Name: v.Name, Value: v.Value})
+	}
+	if len(s.X402Hosts) > 0 {
+		vars = append(vars, sandbox.Var{Name: "BUGNET_X402", Value: "1"},
+			sandbox.Var{Name: "BUGNET_X402_HOSTS", Value: strings.Join(s.X402Hosts, ",")})
+	}
+	return vars
 }
 
 // validPlaceholder accepts bnsec_ and 26 base32 characters, so no value reaches the sandbox
@@ -377,12 +410,8 @@ func hostsBlock(ip string, hosts []string) string {
 
 // writeEnv sends our sshd SIGHUP only when its SetEnv line changed, so new sessions see it
 func (a applier) writeEnv(ctx context.Context, s Spec) error {
-	vars := make([]sandbox.Var, len(s.Env))
-	for i, v := range s.Env {
-		vars[i] = sandbox.Var{Name: v.Name, Value: v.Value}
-	}
-	if _, err := sandbox.WriteFile(a.root.Path(sandbox.SecretsEnvFile), sandbox.FormatEnv(vars),
-		0o644); err != nil {
+	if _, err := sandbox.WriteFile(a.root.Path(sandbox.SecretsEnvFile),
+		sandbox.FormatEnv(s.envVars()), 0o644); err != nil {
 		return err
 	}
 	if err := sandbox.WriteProfile(a.root); err != nil {
