@@ -135,9 +135,9 @@ App traffic loses `Bugnet-*`, `E2b-*`, `X-Routing-Key` and the `_port_auth` cook
 and `Server` move to `Bugnet-Cache-Control` and `Bugnet-Server` (`-` when absent), and the
 response carries `Cache-Control: private`.
 
-`egress apply --spec FILE [--root DIR]` points the sandbox's secret hosts at the forwarder. It
-reads the spec and deletes it, even when the spec or an argument after `--spec` is wrong. Then,
-in this order:
+`egress apply --spec FILE [--root DIR]` points the sandbox's secret hosts and x402 hosts at the
+forwarder. It reads the spec and deletes it, even when the spec or an argument after `--spec` is
+wrong. Then, in this order:
 
 1. Writes `/etc/bugnet/egress.token` (0600) when the spec carries a token.
 2. Writes `/etc/bugnet/egress.json` (0644) with the endpoint, its pinned IPs, the port, the listen
@@ -183,7 +183,8 @@ order. Both lines reach login shells, our sshd and every new job, as the placeho
 An empty or absent list writes neither line, and a later run without it removes both. `secrets`
 in the output counts `env` alone.
 
-`forward --config /etc/bugnet/egress.json [--root DIR]` relays raw TLS for secret hosts:
+`forward --config /etc/bugnet/egress.json [--root DIR]` relays raw TLS for secret hosts and x402
+hosts:
 
 - It listens on `127.77.0.1` only. A config naming `127.0.0.1`, `::1` or any other address is
   refused, since envd on E2B publishes listeners there. Under a test `--root` it may listen on
