@@ -22,8 +22,8 @@ import (
 
 func TestWireNames(t *testing.T) {
 	t.Parallel()
-	eq(t, []string{HeaderKey, HeaderPort, HeaderHost, HeaderClientIP}, []string{
-		"Bugnet-Gate", "Bugnet-Port", "Bugnet-Host", "Bugnet-Client-Ip",
+	eq(t, []string{HeaderKey, HeaderPort, HeaderHost, HeaderClientIP, HeaderOrigin}, []string{
+		"Bugnet-Gate", "Bugnet-Port", "Bugnet-Host", "Bugnet-Client-Ip", "Bugnet-Origin",
 	})
 	eq(t, []string{HeaderResponse, HeaderError, HeaderVersion, HeaderCacheControl, HeaderServer},
 		[]string{"Bugnet-Gate-Response", "Bugnet-Gate-Error", "Bugnet-Gate-Version",
@@ -114,11 +114,34 @@ func TestGateRewritesRequestHeaders(t *testing.T) {
 	eq(t, seen.anyHeaderWithPrefix("Bugnet-", "E2b-"), false)
 	eq(t, seen.get("e2b-traffic-access-token")+seen.get("X-Routing-Key"), "")
 	eq(t, seen.get("Authorization"), "Bearer app")
-	eq(t, seen.get("Origin"), "https://o")
+	eq(t, seen.get("Origin"), "")
 
 	gateGet(t, g, "/y", app(seen.port, "Cookie", "_port_auth=1", "Bugnet-Client-Ip", "nonsense"))
 	eq(t, seen.get("Cookie"), "")
 	eq(t, seen.get("X-Forwarded-For"), "")
+}
+
+func TestGateRestoresOriginFromBugnetOrigin(t *testing.T) { // ruling 18W
+	t.Parallel()
+	g := startGate(t)
+	seen := appRecorder(t)
+	gateGet(t, g, "/x", app(seen.port, "Bugnet-Origin", "https://x.preview.example"))
+	eq(t, seen.values("Origin"), []string{"https://x.preview.example"})
+	eq(t, seen.anyHeaderWithPrefix("Bugnet-"), false)
+
+	gateGet(t, g, "/y", app(seen.port, "Origin", "https://o"))
+	eq(t, seen.values("Origin"), []string(nil))
+
+	ws := wsRecorder(t, "chat")
+	res, _, _ := upgrade(t, g, "/socket", app(ws.port, "Bugnet-Origin",
+		"https://x.preview.example"), "chat")
+	eq(t, res.StatusCode, 101)
+	eq(t, ws.values("Origin"), []string{"https://x.preview.example"})
+	eq(t, ws.anyHeaderWithPrefix("Bugnet-"), false)
+
+	res, _, _ = upgrade(t, g, "/socket", app(ws.port, "Origin", "https://o"), "chat")
+	eq(t, res.StatusCode, 101)
+	eq(t, ws.values("Origin"), []string(nil))
 }
 
 func TestGateKeepsPathAndQueryByteForByte(t *testing.T) {
