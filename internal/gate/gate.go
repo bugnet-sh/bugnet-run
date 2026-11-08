@@ -18,6 +18,7 @@ import (
 	"net/netip"
 	"os"
 	"os/signal"
+	"slices"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -34,6 +35,7 @@ const (
 	HeaderPort     = "Bugnet-Port"
 	HeaderHost     = "Bugnet-Host"
 	HeaderClientIP = "Bugnet-Client-Ip"
+	HeaderOrigin   = "Bugnet-Origin"
 )
 
 // Response headers the gate sets
@@ -374,6 +376,11 @@ func rewrite(pr *httputil.ProxyRequest) {
 	pr.Out.Header.Set("X-Forwarded-Proto", "https")
 	if ip, err := netip.ParseAddr(in.Get(HeaderClientIP)); err == nil {
 		pr.Out.Header.Set("X-Forwarded-For", ip.String())
+	}
+	// The edge carries the browser's Origin past the provider's proxy, ruling 18W
+	pr.Out.Header.Del("Origin")
+	if v := in.Values(HeaderOrigin); len(v) > 0 {
+		pr.Out.Header["Origin"] = slices.Clone(v)
 	}
 	for name := range pr.Out.Header {
 		l := strings.ToLower(name)

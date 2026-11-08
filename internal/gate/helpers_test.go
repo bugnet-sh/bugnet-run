@@ -210,6 +210,12 @@ func (r *recorder) get(name string) string {
 	return strings.Join(r.header.Values(name), ", ")
 }
 
+func (r *recorder) values(name string) []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.header.Values(name)
+}
+
 func (r *recorder) anyHeaderWithPrefix(prefixes ...string) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -254,6 +260,24 @@ func upgrade(t *testing.T, g *testGate, path string, h http.Header,
 		_ = res.Body.Close()
 	}
 	return res, conn, br
+}
+
+// wsRecorder accepts WebSocket upgrades for protocol and keeps what the last one carried
+func wsRecorder(t *testing.T, protocol string) *recorder {
+	t.Helper()
+	r := &recorder{}
+	r.port = serve(t, http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		r.mu.Lock()
+		r.host, r.uri, r.header = req.Host, req.RequestURI, req.Header.Clone()
+		r.mu.Unlock()
+		c, err := wsframe.Accept(w, req, protocol)
+		if err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		_ = c.Close()
+	}))
+	return r
 }
 
 // echoApp answers WebSocket upgrades for protocol and echoes every message

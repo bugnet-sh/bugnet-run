@@ -131,9 +131,10 @@ WebSocket short.
 
 App traffic loses `Bugnet-*`, `E2b-*`, `X-Routing-Key` and the `_port_auth` cookie. It gets
 `Host` and `X-Forwarded-Host` from `Bugnet-Host`, `X-Forwarded-For` from `Bugnet-Client-Ip` and
-`X-Forwarded-Proto: https`. The query reaches the app byte for byte. The app's `Cache-Control`
-and `Server` move to `Bugnet-Cache-Control` and `Bugnet-Server` (`-` when absent), and the
-response carries `Cache-Control: private`.
+`X-Forwarded-Proto: https`. Its `Origin` is `Bugnet-Origin`, or none without it, since the edge
+moves the browser's `Origin` past the provider's proxy. The query reaches the app byte for byte.
+The app's `Cache-Control` and `Server` move to `Bugnet-Cache-Control` and `Bugnet-Server`
+(`-` when absent), and the response carries `Cache-Control: private`.
 
 `egress apply --spec FILE [--root DIR]` points the sandbox's secret hosts and x402 hosts at the
 forwarder. It reads the spec and deletes it, even when the spec or an argument after `--spec` is
