@@ -16,7 +16,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/oynozan/bugnet-run/internal/sandbox"
+	"github.com/bugnet-sh/bugnet-run/internal/sandbox"
 )
 
 // Spec is what apply_secrets writes to /tmp/bugnet/egress-spec.json

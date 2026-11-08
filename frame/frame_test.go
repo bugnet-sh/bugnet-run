@@ -10,7 +10,7 @@ import (
 	"testing"
 	"testing/iotest"
 
-	"github.com/oynozan/bugnet-run/frame"
+	"github.com/bugnet-sh/bugnet-run/frame"
 )
 
 func allBytes() []byte {

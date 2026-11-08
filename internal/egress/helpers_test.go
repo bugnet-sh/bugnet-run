@@ -33,8 +33,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/oynozan/bugnet-run/internal/sandbox"
-	"github.com/oynozan/bugnet-run/internal/wsframe"
+	"github.com/bugnet-sh/bugnet-run/internal/sandbox"
+	"github.com/bugnet-sh/bugnet-run/internal/wsframe"
 )
 
 const testEndpoint = "egress.test.example"
@@ -61,7 +61,7 @@ func runTests(m *testing.M) int {
 	defer func() { _ = os.RemoveAll(dir) }()
 	binPath = filepath.Join(dir, "bugnet-run")
 	build := exec.Command("go", "build", "-o", binPath,
-		"github.com/oynozan/bugnet-run/cmd/bugnet-run")
+		"github.com/bugnet-sh/bugnet-run/cmd/bugnet-run")
 	if out, err := build.CombinedOutput(); err != nil {
 		fmt.Fprintf(os.Stderr, "build bugnet-run: %v\n%s", err, out)
 		return 1

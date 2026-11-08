@@ -19,8 +19,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/oynozan/bugnet-run/internal/sandbox"
-	"github.com/oynozan/bugnet-run/internal/wsframe"
+	"github.com/bugnet-sh/bugnet-run/internal/sandbox"
+	"github.com/bugnet-sh/bugnet-run/internal/wsframe"
 )
 
 var (

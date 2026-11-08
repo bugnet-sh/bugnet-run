@@ -10,8 +10,8 @@ import (
 	"os/exec"
 	"time"
 
-	"github.com/oynozan/bugnet-run/internal/harden"
-	"github.com/oynozan/bugnet-run/internal/sandbox"
+	"github.com/bugnet-sh/bugnet-run/internal/harden"
+	"github.com/bugnet-sh/bugnet-run/internal/sandbox"
 )
 
 // firewallName stands in respawn's started list for a firewall table loaded again

@@ -13,14 +13,14 @@ import (
 	"strings"
 	"syscall"
 
-	"github.com/oynozan/bugnet-run/frame"
-	"github.com/oynozan/bugnet-run/internal/egress"
-	"github.com/oynozan/bugnet-run/internal/gate"
-	"github.com/oynozan/bugnet-run/internal/harden"
-	"github.com/oynozan/bugnet-run/internal/sample"
-	"github.com/oynozan/bugnet-run/internal/setup"
-	"github.com/oynozan/bugnet-run/internal/sshup"
-	"github.com/oynozan/bugnet-run/internal/xfer"
+	"github.com/bugnet-sh/bugnet-run/frame"
+	"github.com/bugnet-sh/bugnet-run/internal/egress"
+	"github.com/bugnet-sh/bugnet-run/internal/gate"
+	"github.com/bugnet-sh/bugnet-run/internal/harden"
+	"github.com/bugnet-sh/bugnet-run/internal/sample"
+	"github.com/bugnet-sh/bugnet-run/internal/setup"
+	"github.com/bugnet-sh/bugnet-run/internal/sshup"
+	"github.com/bugnet-sh/bugnet-run/internal/xfer"
 )
 
 const defaultDir = "/tmp/bugnet/jobs"

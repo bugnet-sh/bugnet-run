@@ -10,7 +10,7 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/oynozan/bugnet-run/frame"
+	"github.com/bugnet-sh/bugnet-run/frame"
 )
 
 const (

@@ -92,7 +92,7 @@ func throughHosts(t *testing.T, id, msg string) string {
 
 func TestContainerApplyOnBindMountedHosts(t *testing.T) {
 	needDocker(t)
-	runner := linuxBuild(t, "github.com/oynozan/bugnet-run/cmd/bugnet-run")
+	runner := linuxBuild(t, "github.com/bugnet-sh/bugnet-run/cmd/bugnet-run")
 	echo := linuxBuild(t, "./testdata/tunnelecho")
 	p := newPKI(t)
 	leaf := p.leaf(t, testEndpoint)
@@ -195,7 +195,7 @@ func TestContainerApplyOnBindMountedHosts(t *testing.T) {
 
 func TestContainerApplyX402Hosts(t *testing.T) {
 	needDocker(t)
-	runner := linuxBuild(t, "github.com/oynozan/bugnet-run/cmd/bugnet-run")
+	runner := linuxBuild(t, "github.com/bugnet-sh/bugnet-run/cmd/bugnet-run")
 	p := newPKI(t)
 	s := spec("agent402.tools")
 	s.Endpoint, s.IPs, s.Port, s.Home = testEndpoint, []string{"127.0.0.1"}, 9443, "/root"

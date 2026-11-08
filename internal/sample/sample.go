@@ -22,7 +22,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/oynozan/bugnet-run/internal/sandbox"
+	"github.com/bugnet-sh/bugnet-run/internal/sandbox"
 )
 
 // StatsFile is where the sampler keeps its readings, for the router to read before a destroy

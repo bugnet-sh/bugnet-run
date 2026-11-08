@@ -77,7 +77,7 @@ func linuxRunner(t *testing.T) string {
 		cleanups = append(cleanups, func() { _ = os.RemoveAll(dir) })
 		runnerBin = filepath.Join(dir, "bugnet-run")
 		build := exec.Command("go", "build", "-trimpath", "-o", runnerBin,
-			"github.com/oynozan/bugnet-run/cmd/bugnet-run")
+			"github.com/bugnet-sh/bugnet-run/cmd/bugnet-run")
 		build.Env = append(os.Environ(), "GOOS=linux", "GOARCH="+arch, "CGO_ENABLED=0")
 		if out, err := build.CombinedOutput(); err != nil {
 			runnerErr = "build for linux/" + arch + ": " + err.Error() + "\n" + string(out)

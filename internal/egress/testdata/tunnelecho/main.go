@@ -9,7 +9,7 @@ import (
 	"os"
 	"strings"
 
-	"github.com/oynozan/bugnet-run/internal/wsframe"
+	"github.com/bugnet-sh/bugnet-run/internal/wsframe"
 )
 
 func main() {

@@ -14,7 +14,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/oynozan/bugnet-run/internal/sandbox"
+	"github.com/bugnet-sh/bugnet-run/internal/sandbox"
 )
 
 // tools runs the firewall programs, a seam so tests never touch the host's firewall

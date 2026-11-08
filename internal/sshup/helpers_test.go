@@ -19,7 +19,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/oynozan/bugnet-run/internal/sandbox"
+	"github.com/bugnet-sh/bugnet-run/internal/sandbox"
 )
 
 // gwLine is the gateway's authorized_keys line as the router writes it

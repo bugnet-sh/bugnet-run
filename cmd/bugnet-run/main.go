@@ -4,7 +4,7 @@ package main
 import (
 	"os"
 
-	"github.com/oynozan/bugnet-run/internal/runner"
+	"github.com/bugnet-sh/bugnet-run/internal/runner"
 )
 
 func main() {

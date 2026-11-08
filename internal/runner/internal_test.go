@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/oynozan/bugnet-run/frame"
+	"github.com/bugnet-sh/bugnet-run/frame"
 )
 
 func TestParsePid(t *testing.T) {

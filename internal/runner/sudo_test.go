@@ -17,9 +17,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/oynozan/bugnet-run/frame"
-	"github.com/oynozan/bugnet-run/internal/gate"
-	"github.com/oynozan/bugnet-run/internal/sandbox"
+	"github.com/bugnet-sh/bugnet-run/frame"
+	"github.com/bugnet-sh/bugnet-run/internal/gate"
+	"github.com/bugnet-sh/bugnet-run/internal/sandbox"
 )
 
 // The test binary acts as bugnet-run that is not root when sudoEnv names a stand-in for sudo

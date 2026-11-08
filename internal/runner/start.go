@@ -10,8 +10,8 @@ import (
 	"path/filepath"
 	"syscall"
 
-	"github.com/oynozan/bugnet-run/frame"
-	"github.com/oynozan/bugnet-run/internal/sandbox"
+	"github.com/bugnet-sh/bugnet-run/frame"
+	"github.com/bugnet-sh/bugnet-run/internal/sandbox"
 )
 
 type commandSpec struct {

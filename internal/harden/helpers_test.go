@@ -15,7 +15,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/oynozan/bugnet-run/internal/sandbox"
+	"github.com/bugnet-sh/bugnet-run/internal/sandbox"
 )
 
 func eq[T any](t *testing.T, got, want T) {

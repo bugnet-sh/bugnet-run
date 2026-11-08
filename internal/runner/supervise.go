@@ -11,7 +11,7 @@ import (
 	"strings"
 	"syscall"
 
-	"github.com/oynozan/bugnet-run/internal/sandbox"
+	"github.com/bugnet-sh/bugnet-run/internal/sandbox"
 )
 
 // Shell conventions for a command that could not be started

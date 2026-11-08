@@ -17,8 +17,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/oynozan/bugnet-run/internal/gate"
-	"github.com/oynozan/bugnet-run/internal/sandbox"
+	"github.com/bugnet-sh/bugnet-run/internal/gate"
+	"github.com/bugnet-sh/bugnet-run/internal/sandbox"
 )
 
 var gateKey = base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{5}, 32))

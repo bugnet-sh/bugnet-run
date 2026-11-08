@@ -49,7 +49,7 @@ func TestContainerTransferHelpersAsRoot(t *testing.T) {
 	arch := docker(t, "version", "--format", "{{.Server.Arch}}")
 	bin := filepath.Join(t.TempDir(), "bugnet-run")
 	build := exec.Command("go", "build", "-trimpath", "-o", bin,
-		"github.com/oynozan/bugnet-run/cmd/bugnet-run")
+		"github.com/bugnet-sh/bugnet-run/cmd/bugnet-run")
 	build.Env = append(os.Environ(), "GOOS=linux", "GOARCH="+arch, "CGO_ENABLED=0")
 	if out, err := build.CombinedOutput(); err != nil {
 		t.Fatalf("build for linux/%s: %v\n%s", arch, err, out)

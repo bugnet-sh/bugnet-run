@@ -13,7 +13,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/oynozan/bugnet-run/internal/sandbox"
+	"github.com/bugnet-sh/bugnet-run/internal/sandbox"
 )
 
 func loadConfig(t *testing.T, root sandbox.Root, change func(*Config)) error {
