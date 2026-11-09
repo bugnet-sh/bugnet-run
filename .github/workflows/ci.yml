@@ -1,0 +1,58 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  go:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        shell: bash
+        working-directory: bugnet-run
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          path: bugnet-run
+          persist-credentials: false
+
+      # The module has no dependencies and so no go.sum to key a cache on
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: bugnet-run/go.mod
+          cache: false
+
+      - name: gofmt
+        run: |
+          set -euo pipefail
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "gofmt -w needed on:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: go build
+        run: go build ./...
+
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v9
+        with:
+          version: v2.14.0
+          working-directory: bugnet-run
+
+      # Container tests skip unless BUGNET_TEST_DOCKER=1
+      - name: go test
+        run: go test -short -timeout 10m ./...
