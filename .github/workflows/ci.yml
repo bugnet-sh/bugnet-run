@@ -55,4 +55,17 @@ jobs:
 
       # Container tests skip unless BUGNET_TEST_DOCKER=1
       - name: go test
-        run: go test -short -timeout 10m ./...
+        run: |
+          set -euo pipefail
+          go test -short -timeout 10m ./... 2>&1 | tee "$RUNNER_TEMP/go-test.log"
+
+      # Puts the failing tests' output in an annotation, shown on the run page and the PR
+      - name: Report failed tests
+        if: failure()
+        run: |
+          set -euo pipefail
+          log="$RUNNER_TEMP/go-test.log"
+          [ -f "$log" ] || exit 0
+          { grep -E -A 25 -- '--- FAIL|^panic:|^FAIL' "$log" || true; } | head -300 \
+            | sed 's/%/%25/g' | awk '{ printf "%s%%0A", $0 }' > "$RUNNER_TEMP/failures"
+          echo "::error title=go test failures::$(cat "$RUNNER_TEMP/failures")"
