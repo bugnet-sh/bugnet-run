@@ -203,6 +203,7 @@ type tunnelServer struct {
 	stall atomic.Bool
 	mu    sync.Mutex
 	reqs  []*http.Request
+	srcs  []string
 }
 
 func newTunnelServer(t *testing.T, p *pki, name string) *tunnelServer {
@@ -230,6 +231,8 @@ func serveTunnel(t *testing.T, p *pki, name string, ln net.Listener) *tunnelServ
 func (s *tunnelServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
 	s.reqs = append(s.reqs, r.Clone(context.Background()))
+	host, _, _ := net.SplitHostPort(r.RemoteAddr)
+	s.srcs = append(s.srcs, host)
 	s.mu.Unlock()
 	if s.stall.Load() {
 		select {
@@ -261,6 +264,13 @@ func (s *tunnelServer) requests() []*http.Request {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return append([]*http.Request(nil), s.reqs...)
+}
+
+// sources returns the client address of each upgrade request
+func (s *tunnelServer) sources() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.srcs...)
 }
 
 // dropListener closes the first drop connections before any TLS, and keeps them silent under hold

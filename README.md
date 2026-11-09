@@ -142,7 +142,8 @@ wrong. Then, in this order:
 
 1. Writes `/etc/bugnet/egress.token` (0600) when the spec carries a token.
 2. Writes `/etc/bugnet/egress.json` (0644) with the endpoint, its pinned IPs, the port, the listen
-   address and the hosts.
+   address and the hosts. A spec `source` object, `{"family": "ipv4|ipv6", "bind": "<address>"}`,
+   becomes `family` and `bind`.
 3. Starts the forwarder, or sends it `SIGHUP` when its config or token changed. A new listen
    address restarts it. Before a start it binds the listen address for a moment, so a taken port
    is found at once. A start or restart first copies the runner as `setup` does.
@@ -169,10 +170,13 @@ of these and exits 1:
 
 | Error | Cause |
 |---|---|
-| `bad_spec` | The spec is missing, malformed or fails a check |
+| `bad_spec` | The spec is missing, malformed or fails a check, such as a bad `source` |
 | `port_443_taken` | Another process holds the listen address |
 | `token_missing` | The spec has no token and `/etc/bugnet/egress.token` holds none |
 | `apply_failed` | A write failed, the forwarder did not listen in 5 s, or sshd hung in a reload |
+
+A `source` is bad when its family is neither `ipv4` nor `ipv6`, its bind is empty or not an
+address of that family, or no pinned IP has that family. The router never writes such a spec.
 
 The spec holds placeholders only. An `env` value, `git_placeholder` or `npm_placeholder` that is
 not `bnsec_` and 26 base32 characters is `bad_spec`. Hosts must be lower-case names. A second run
@@ -195,6 +199,9 @@ hosts:
   replaces them, under a test `--root` only.
 - It sends `GET /v1/tunnel` with `Authorization: Bearer bnt_...` and the subprotocol
   `bugnet-tunnel.v1`, and after `101` copies bytes both ways in binary messages.
+- With `family`, it dials only the pinned IPs of that family, in their order. With `bind`, each
+  dial starts from that address. When no interface holds it (`EADDRNOTAVAIL`), it dials once
+  more without it and counts `bind_missing`, which the periodic log line shows.
 - Each IP gets 5 s to connect, then 10 s for the TLS handshake and the upgrade. A proxy that
   stalls past that is dropped and the next IP is tried, so a stalled proxy holds a slot for at
   most 15 s per IP tried.
@@ -208,7 +215,8 @@ hosts:
   never hosts, the token or bytes. A failed listen names the listen address. A config field that
   fails its check is named, never quoted.
 
-`egress.json` holds `endpoint`, `ips`, `port`, `listen`, `token_file`, `hosts` and `roots_file`.
+`egress.json` holds `endpoint`, `ips`, `port`, `listen`, `token_file`, `hosts` and `roots_file`,
+and when the spec had a `source`, `family` and `bind`.
 Its paths are sandbox paths, mapped through `--root`.
 
 `ssh-up --spec FILE [--root DIR] [--new-host-key]` makes our sshd ready behind the gate's SSH

@@ -36,6 +36,14 @@ type Spec struct {
 	NPMPlaceholder string `json:"npm_placeholder"`
 	// X402Hosts are the hosts of x402 services, each also in Hosts, omitted when there are none
 	X402Hosts []string `json:"x402_hosts,omitempty"`
+	// Source pins the family the forwarder dials and the address it dials from
+	Source *Source `json:"source,omitempty"`
+}
+
+// Source is the spec's source object, whose fields land in egress.json as family and bind
+type Source struct {
+	Family string `json:"family"`
+	Bind   string `json:"bind"`
 }
 
 // EnvVar is one NAME=placeholder line of secrets.env
@@ -183,10 +191,14 @@ func (s Spec) config() Config {
 	if hosts == nil {
 		hosts = []string{}
 	}
-	return Config{
+	c := Config{
 		Endpoint: s.Endpoint, IPs: s.IPs, Port: s.Port, Listen: s.Listen,
 		TokenFile: sandbox.EgressToken, Hosts: hosts, RootsFile: rootsForTests,
 	}
+	if s.Source != nil {
+		c.Family, c.Bind = s.Source.Family, s.Source.Bind
+	}
+	return c
 }
 
 // check names a bad field without quoting values, since they may be tokens or placeholders
@@ -196,6 +208,9 @@ func (s Spec) check(root sandbox.Root) error {
 	}
 	if s.Token != "" && !validToken(s.Token) {
 		return errors.New("token is not bnt_ and 43 base64url characters")
+	}
+	if s.Source != nil && s.Source.Bind == "" {
+		return errors.New("source has no bind")
 	}
 	if err := s.config().check(root); err != nil {
 		return err

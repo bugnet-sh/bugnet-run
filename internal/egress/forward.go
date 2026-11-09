@@ -64,6 +64,10 @@ type Config struct {
 	Hosts     []string `json:"hosts"`
 	// RootsFile replaces the system roots, and only a run under a test root may set it
 	RootsFile string `json:"roots_file"`
+	// Family limits dials to the pinned IPs of "ipv4" or "ipv6", every pinned IP when empty
+	Family string `json:"family,omitempty"`
+	// Bind is the local address each dial starts from, the kernel's choice when empty
+	Bind string `json:"bind,omitempty"`
 }
 
 // LoadConfig reads egress.json, refusing unknown fields and any listen address but ListenIP
@@ -92,6 +96,9 @@ func (c Config) check(root sandbox.Root) error {
 	if err := checkIPs(c.IPs); err != nil {
 		return err
 	}
+	if err := c.checkSource(); err != nil {
+		return err
+	}
 	if c.Port < 1 || c.Port > 65535 {
 		return errors.New("port is not 1 to 65535")
 	}
@@ -105,6 +112,48 @@ func (c Config) check(root sandbox.Root) error {
 		return errors.New("roots_file is only for runs under a test root")
 	}
 	return checkHosts(c.Hosts)
+}
+
+// Family names of Config.Family
+const (
+	FamilyIPv4 = "ipv4"
+	FamilyIPv6 = "ipv6"
+)
+
+// inFamily reports whether a belongs to family, reading an IPv4-mapped address as IPv4
+func inFamily(a netip.Addr, family string) bool {
+	switch a = a.Unmap(); family {
+	case FamilyIPv4:
+		return a.Is4()
+	case FamilyIPv6:
+		return a.Is6()
+	}
+	return false
+}
+
+// checkSource refuses an unknown family, a bind of the other family and a family no IP has
+func (c Config) checkSource() error {
+	if c.Family == "" {
+		if c.Bind != "" {
+			return errors.New("bind needs a family")
+		}
+		return nil
+	}
+	if c.Family != FamilyIPv4 && c.Family != FamilyIPv6 {
+		return errors.New("family is neither ipv4 nor ipv6")
+	}
+	if c.Bind != "" {
+		if a, err := netip.ParseAddr(c.Bind); err != nil || a.Zone() != "" ||
+			!inFamily(a, c.Family) {
+			return errors.New("bind is not an address of the family")
+		}
+	}
+	for _, ip := range c.IPs {
+		if a, err := netip.ParseAddr(ip); err == nil && inFamily(a, c.Family) {
+			return nil
+		}
+	}
+	return errors.New("no pinned ip is in the family")
 }
 
 func checkIPs(ips []string) error {
@@ -196,6 +245,8 @@ type Forwarder struct {
 	accepted atomic.Int64
 	active   atomic.Int64
 	failed   atomic.Int64
+	// bindMissing counts dials that fell back to the kernel's address
+	bindMissing atomic.Int64
 }
 
 // target is what one tunnel dials, read once per connection so a reload never changes it midway
@@ -345,7 +396,7 @@ func (f *Forwarder) relay(ctx context.Context, c net.Conn) {
 // connect retries the first dial after start once, since Boat's first outbound one can fail
 func (f *Forwarder) connect(ctx context.Context) (*wsframe.Conn, error) {
 	first := !f.dialed.Swap(true)
-	ws, err := f.target().tunnel(ctx, f.handshakeWithin)
+	ws, err := f.target().tunnel(ctx, f.handshakeWithin, &f.bindMissing)
 	if err == nil || !first || !retryable(err) {
 		return ws, err
 	}
@@ -354,7 +405,7 @@ func (f *Forwarder) connect(ctx context.Context) (*wsframe.Conn, error) {
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	}
-	return f.target().tunnel(ctx, f.handshakeWithin)
+	return f.target().tunnel(ctx, f.handshakeWithin, &f.bindMissing)
 }
 
 // retryable is false once the proxy answered or showed a certificate that will not change
@@ -365,10 +416,16 @@ func retryable(err error) bool {
 }
 
 // tunnel tries the pinned addresses in order until one answers the upgrade
-func (t *target) tunnel(ctx context.Context, within time.Duration) (*wsframe.Conn, error) {
+func (t *target) tunnel(ctx context.Context, within time.Duration,
+	missing *atomic.Int64) (*wsframe.Conn, error) {
 	var errs []error
 	for _, ip := range t.cfg.IPs {
-		ws, err := t.via(ctx, ip, within)
+		if t.cfg.Family != "" {
+			if a, err := netip.ParseAddr(ip); err != nil || !inFamily(a, t.cfg.Family) {
+				continue
+			}
+		}
+		ws, err := t.via(ctx, ip, within, missing)
 		if err == nil {
 			return ws, nil
 		}
@@ -381,9 +438,9 @@ func (t *target) tunnel(ctx context.Context, within time.Duration) (*wsframe.Con
 	return nil, errors.Join(errs...)
 }
 
-func (t *target) via(ctx context.Context, ip string, within time.Duration) (*wsframe.Conn, error) {
-	d := net.Dialer{Timeout: dialTimeout}
-	raw, err := d.DialContext(ctx, "tcp", net.JoinHostPort(ip, strconv.Itoa(t.cfg.Port)))
+func (t *target) via(ctx context.Context, ip string, within time.Duration,
+	missing *atomic.Int64) (*wsframe.Conn, error) {
+	raw, err := t.dial(ctx, ip, missing)
 	if err != nil {
 		return nil, err
 	}
@@ -406,20 +463,41 @@ func (t *target) via(ctx context.Context, ip string, within time.Duration) (*wsf
 	return ws, nil
 }
 
+// dial starts from Bind when set, and once more from the kernel's address when no interface
+// holds it, since the address may have moved before the router noticed
+func (t *target) dial(ctx context.Context, ip string, missing *atomic.Int64) (net.Conn, error) {
+	d := net.Dialer{Timeout: dialTimeout}
+	addr := net.JoinHostPort(ip, strconv.Itoa(t.cfg.Port))
+	if t.cfg.Bind != "" {
+		if b, err := netip.ParseAddr(t.cfg.Bind); err == nil {
+			d.LocalAddr = &net.TCPAddr{IP: b.Unmap().AsSlice()}
+			c, err := d.DialContext(ctx, "tcp", addr)
+			if !errors.Is(err, syscall.EADDRNOTAVAIL) {
+				return c, err
+			}
+			missing.Add(1)
+			d.LocalAddr = nil
+		}
+	}
+	return d.DialContext(ctx, "tcp", addr)
+}
+
 // report logs counts only, never hosts, addresses or bytes
 func (f *Forwarder) report(ctx context.Context) {
 	tick := time.NewTicker(f.every)
 	defer tick.Stop()
-	var last [3]int64
+	var last [4]int64
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-tick.C:
 		}
-		now := [3]int64{f.accepted.Load(), f.active.Load(), f.failed.Load()}
+		now := [4]int64{f.accepted.Load(), f.active.Load(), f.failed.Load(),
+			f.bindMissing.Load()}
 		if now != last {
-			f.logger.Printf("connections %d, open %d, failed %d", now[0], now[1], now[2])
+			f.logger.Printf("connections %d, open %d, failed %d, bind_missing %d",
+				now[0], now[1], now[2], now[3])
 			last = now
 		}
 	}

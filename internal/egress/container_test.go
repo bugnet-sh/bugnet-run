@@ -251,3 +251,40 @@ func waitEcho(t *testing.T, id string) {
 	waitIn(t, id, "test -e /run/bugnet/forward.pid")
 	eq(t, throughHosts(t, id, "ping"), "ping")
 }
+
+func TestContainerBoundSource(t *testing.T) {
+	needDocker(t)
+	runner := linuxBuild(t, "github.com/bugnet-sh/bugnet-run/cmd/bugnet-run")
+	echo := linuxBuild(t, "./testdata/tunnelecho")
+	p := newPKI(t)
+	leaf := p.leaf(t, testEndpoint)
+	dir := t.TempDir()
+	writeFile(t, dir+"/leaf.pem", string(certPEM(leaf.Certificate[0])))
+	writeFile(t, dir+"/leaf.key", string(keyPEM(t, leaf.PrivateKey)))
+	s := spec("huggingface.co")
+	s.Endpoint, s.Port, s.Home = testEndpoint, 9443, "/root"
+	s.IPs = []string{"127.0.0.1", "::1"}
+	s.Source = &Source{Family: FamilyIPv6, Bind: "::1"}
+	b, err := json.Marshal(s)
+	must(t, err)
+
+	for _, image := range containerImages {
+		t.Run(image, func(t *testing.T) {
+			id := docker(t, nil, "run", "-d", "--rm", "--init",
+				"--sysctl", "net.ipv6.conf.all.disable_ipv6=0",
+				"--sysctl", "net.ipv6.conf.lo.disable_ipv6=0", image, "sleep", "600")
+			t.Cleanup(func() { _ = exec.Command("docker", "rm", "-f", id).Run() })
+			docker(t, nil, "cp", runner, id+":/usr/local/bin/bugnet-run")
+			docker(t, nil, "cp", echo, id+":/usr/local/bin/tunnelecho")
+			docker(t, nil, "cp", dir+"/leaf.pem", id+":/tmp/leaf.pem")
+			docker(t, nil, "cp", dir+"/leaf.key", id+":/tmp/leaf.key")
+			docker(t, p.pem, "exec", "-i", id, "sh", "-c",
+				"mkdir -p /etc/ssl/certs && cat > /etc/ssl/certs/ca-certificates.crt")
+			docker(t, nil, "exec", "-d", id, "tunnelecho", "/tmp/leaf.pem", "/tmp/leaf.key",
+				"[::1]:9443", "/tmp/sources")
+			eq(t, containerApply(t, id, b), `{"forward":"listening","hosts":1,"secrets":1}`)
+			waitEcho(t, id)
+			eq(t, inContainer(t, id, "sort -u /tmp/sources"), "::1")
+		})
+	}
+}

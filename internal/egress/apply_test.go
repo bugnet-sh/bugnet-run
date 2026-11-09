@@ -402,6 +402,17 @@ func TestApplyBadSpec(t *testing.T) {
 		"home line break":    func(s *Spec) { s.Home = "/home/boxd\n" },
 		"home not clean":     func(s *Spec) { s.Home = "/home/../etc" },
 		"placeholder breaks": func(s *Spec) { s.Env[0].Value = hfPlaceholder + "\nX=1" },
+		"source family": func(s *Spec) {
+			s.Source = &Source{Family: "ipv5", Bind: "2001:db8::5"}
+		},
+		"source bind of the other family": func(s *Spec) {
+			s.Source = &Source{Family: "ipv6", Bind: "203.0.113.5"}
+		},
+		"source without bind": func(s *Spec) { s.Source = &Source{Family: "ipv6"} },
+		"source family has no ip": func(s *Spec) {
+			s.IPs = []string{"203.0.113.7"}
+			s.Source = &Source{Family: "ipv6", Bind: "2001:db8::5"}
+		},
 		"x402 host not in hosts": func(s *Spec) {
 			s.X402Hosts = []string{"agent402.tools"}
 		},
@@ -997,4 +1008,31 @@ func fakeSystemctl(t *testing.T, root sandbox.Root) func() []string {
 	}
 	t.Cleanup(func() { systemctl = nil })
 	return func() []string { return calls }
+}
+
+func TestApplyWritesTheSourceIntoTheConfig(t *testing.T) {
+	t.Parallel()
+	root := testRoot(t)
+	fwd := newFakeForwarder(t, root)
+	s := spec("huggingface.co")
+	s.Source = &Source{Family: "ipv6", Bind: "2001:db8::5"}
+	applyWith(t, root, fwd, s)
+	cfg, err := LoadConfig(root.Path(sandbox.EgressConfig), root)
+	must(t, err)
+	eq(t, []string{cfg.Family, cfg.Bind}, []string{"ipv6", "2001:db8::5"})
+
+	s.Source = nil
+	applyWith(t, root, fwd, s)
+	raw := readFile(t, root.Path(sandbox.EgressConfig))
+	eq(t, strings.Contains(raw, "family") || strings.Contains(raw, "bind"), false)
+}
+
+func TestSpecWithoutSourceBehavesAsToday(t *testing.T) {
+	t.Parallel()
+	b, err := json.Marshal(spec("huggingface.co"))
+	must(t, err)
+	eq(t, strings.Contains(string(b), "source"), false)
+	cfg, err := json.Marshal(spec("huggingface.co").config())
+	must(t, err)
+	eq(t, strings.Contains(string(cfg), "family"), false)
 }

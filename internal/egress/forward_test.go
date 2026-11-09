@@ -418,3 +418,64 @@ func TestForwardCommandFailures(t *testing.T) {
 		t.Errorf("a forwarder that never listened left %s", addrFile)
 	}
 }
+
+func TestForwardDialsOnlyTheFamilyFromTheBind(t *testing.T) {
+	t.Parallel()
+	first, second := sharedPort(t)
+	if second.Addr().(*net.TCPAddr).IP.To4() != nil {
+		_ = first.Close()
+		_ = second.Close()
+		t.Skip("no IPv6 loopback")
+	}
+	p := newPKI(t)
+	v4 := serveTunnel(t, p, testEndpoint, first)
+	v6 := serveTunnel(t, p, testEndpoint, second)
+	cfg := testConfig(v4)
+	cfg.IPs, cfg.Family, cfg.Bind = []string{"127.0.0.1", "::1"}, FamilyIPv6, "::1"
+	fw := startForwarder(t, p, cfg, testToken)
+	eq(t, roundTrip(t, dial(t, fw.addr), "bound"), "bound")
+	eq(t, v6.sources(), []string{"::1"})
+	eq(t, v4.accepts.Load(), int64(0))
+}
+
+func TestForwardRetriesUnboundOnEADDRNOTAVAIL(t *testing.T) {
+	t.Parallel()
+	p := newPKI(t)
+	s := newTunnelServer(t, p, testEndpoint)
+	cfg := testConfig(s)
+	// 192.0.2.0/24 is documentation space, so no interface holds the address
+	cfg.Family, cfg.Bind = FamilyIPv4, "192.0.2.77"
+	fw := startForwarder(t, p, cfg, testToken,
+		func(f *Forwarder) { f.every = 20 * time.Millisecond })
+	eq(t, roundTrip(t, dial(t, fw.addr), "unbound"), "unbound")
+	eq(t, s.sources(), []string{"127.0.0.1"})
+	eq(t, fw.f.bindMissing.Load(), int64(1))
+	waitFor(t, 5*time.Second, func() bool {
+		return strings.Contains(fw.logs.String(), "bind_missing 1")
+	})
+}
+
+func TestConfigSourceRules(t *testing.T) {
+	t.Parallel()
+	root := testRoot(t)
+	for name, change := range map[string]func(*Config){
+		"unknown family":  func(c *Config) { c.Family = "ipv5" },
+		"bind w/o family": func(c *Config) { c.Bind = "2001:db8::5" },
+		"other family":    func(c *Config) { c.Family, c.Bind = FamilyIPv6, "203.0.113.5" },
+		"bad bind":        func(c *Config) { c.Family, c.Bind = FamilyIPv6, "fe80::1%eth0" },
+		"no ip in it": func(c *Config) {
+			c.IPs, c.Family = []string{"203.0.113.7"}, FamilyIPv6
+		},
+	} {
+		if loadConfig(t, root, change) == nil {
+			t.Errorf("%s was accepted", name)
+		}
+	}
+	for _, change := range map[string]func(*Config){
+		"family only": func(c *Config) { c.Family = FamilyIPv4 },
+		"v6 bind":     func(c *Config) { c.Family, c.Bind = FamilyIPv6, "2001:db8::5" },
+		"mapped bind": func(c *Config) { c.Family, c.Bind = FamilyIPv4, "::ffff:203.0.113.5" },
+	} {
+		must(t, loadConfig(t, root, change))
+	}
+}

@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"strings"
@@ -13,8 +14,8 @@ import (
 )
 
 func main() {
-	if len(os.Args) != 4 {
-		fmt.Fprintln(os.Stderr, "usage: tunnelecho CERT KEY LISTEN")
+	if len(os.Args) != 4 && len(os.Args) != 5 {
+		fmt.Fprintln(os.Stderr, "usage: tunnelecho CERT KEY LISTEN [SOURCES]")
 		os.Exit(2)
 	}
 	cert, err := tls.LoadX509KeyPair(os.Args[1], os.Args[2])
@@ -33,6 +34,14 @@ func main() {
 				!strings.HasPrefix(r.Header.Get("Authorization"), "Bearer bnt_") {
 				w.WriteHeader(http.StatusUnauthorized)
 				return
+			}
+			if len(os.Args) == 5 {
+				host, _, _ := net.SplitHostPort(r.RemoteAddr)
+				if f, err := os.OpenFile(os.Args[4], os.O_APPEND|os.O_CREATE|os.O_WRONLY,
+					0o644); err == nil {
+					_, _ = fmt.Fprintln(f, host)
+					_ = f.Close()
+				}
 			}
 			c, err := wsframe.Accept(w, r, "bugnet-tunnel.v1")
 			if err != nil {
