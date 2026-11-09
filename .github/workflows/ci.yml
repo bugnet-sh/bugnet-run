@@ -66,6 +66,7 @@ jobs:
           set -euo pipefail
           log="$RUNNER_TEMP/go-test.log"
           [ -f "$log" ] || exit 0
-          { grep -E -A 25 -- '--- FAIL|^panic:|^FAIL' "$log" || true; } | head -300 \
+          { grep -v -E '^(ok|\?) ' "$log" | grep -E -A 25 -- '--- FAIL|^panic:|^FAIL' || true; } \
+            | head -300 \
             | sed 's/%/%25/g' | awk '{ printf "%s%%0A", $0 }' > "$RUNNER_TEMP/failures"
           echo "::error title=go test failures::$(cat "$RUNNER_TEMP/failures")"
