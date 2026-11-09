@@ -7,8 +7,11 @@ on:
 permissions:
   contents: read
 
+# Runs on main and feat/router-v1-rest all finish, elsewhere a newer run cancels the older one
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: >-
+    ${{ github.workflow }}-${{ (github.ref == 'refs/heads/main' ||
+    github.ref == 'refs/heads/feat/router-v1-rest') && github.run_id || github.ref }}
   cancel-in-progress: true
 
 jobs:
