@@ -7,11 +7,11 @@ import (
 	"strings"
 )
 
-// SetEnvLine returns our sshd's SetEnv line for both env files, empty when they hold nothing
+// SetEnvLine returns our sshd's SetEnv line for the three env files, empty when they hold nothing
 func SetEnvLine(r Root) (string, error) {
 	var names []string
 	values := map[string]string{}
-	for _, file := range []string{EnvFile, SecretsEnvFile} {
+	for _, file := range []string{ImageEnvFile, EnvFile, SecretsEnvFile} {
 		vars, err := ReadEnvFile(r.Path(file))
 		if err != nil {
 			return "", err

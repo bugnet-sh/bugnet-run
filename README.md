@@ -20,12 +20,13 @@ A job's environment is the runner's own, then these, each later one winning:
 |---|---|
 | 1 | `PYTHONUNBUFFERED=1` |
 | 2 | `LANG=C.UTF-8` and `LC_ALL=C.UTF-8`, which every image has |
-| 3 | `/etc/bugnet/env` |
-| 4 | `/etc/bugnet/secrets.env` |
-| 5 | Each `--env` |
+| 3 | `/etc/bugnet/image.env`, which a base image writes |
+| 4 | `/etc/bugnet/env` |
+| 5 | `/etc/bugnet/secrets.env` |
+| 6 | Each `--env` |
 
 When `--env` sets `LANG` or an `LC_*` variable, the runner leaves `LC_ALL` unset, so that
-setting applies. Both files are read at every job start. Each holds `KEY=VALUE` lines with no
+setting applies. All three files are read at every job start. Each holds `KEY=VALUE` lines with no
 shell expansion. A line whose name fails `^[A-Za-z_][A-Za-z0-9_]*$` is skipped.
 
 Before each job, `start` runs `respawn`: directly as root, or as `sudo -n bugnet-run respawn`
@@ -284,8 +285,8 @@ command line. `authorize` holds at most 16 single lines.
 
 Our `sshd_config` has no `Include`. It listens on `127.0.0.1` only, lets in `user` alone, by key
 alone, with `UsePAM no`, and allows only local forwarding to loopback. Its one `SetEnv` line holds
-the lines of `/etc/bugnet/env` and then `/etc/bugnet/secrets.env`, and `egress apply` keeps it
-current. Under `--root`, its paths are mapped under the root.
+the lines of `/etc/bugnet/image.env`, `/etc/bugnet/env` and `/etc/bugnet/secrets.env`, and
+`egress apply` keeps it current. Under `--root`, its paths are mapped under the root.
 
 `harden --spec FILE` blocks the sandbox's outbound mail, private ranges, metadata addresses and
 mining pools. It runs as root and never under `--root`. It reads the spec and deletes it, even

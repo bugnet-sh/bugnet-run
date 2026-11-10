@@ -116,7 +116,7 @@ func prepare(spec commandSpec) (*exec.Cmd, error) {
 		return nil, err
 	}
 	// Read at every job start, so a secret added a moment ago reaches the next command
-	for _, file := range []string{sandbox.EnvFile, sandbox.SecretsEnvFile} {
+	for _, file := range []string{sandbox.ImageEnvFile, sandbox.EnvFile, sandbox.SecretsEnvFile} {
 		vars, err := sandbox.ReadEnvFile(root.Path(file))
 		if err != nil {
 			continue

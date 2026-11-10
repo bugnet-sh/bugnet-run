@@ -16,6 +16,7 @@ const (
 	RunDir         = "/run/bugnet"
 	GateKeyFile    = "/etc/bugnet/gate.key"
 	GateConfig     = "/etc/bugnet/gate.json"
+	ImageEnvFile   = "/etc/bugnet/image.env"
 	EnvFile        = "/etc/bugnet/env"
 	SecretsEnvFile = "/etc/bugnet/secrets.env"
 	EgressConfig   = "/etc/bugnet/egress.json"

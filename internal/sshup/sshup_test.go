@@ -803,3 +803,13 @@ func TestRedact(t *testing.T) {
 		}
 	}
 }
+
+func TestSSHUpSetEnvStartsWithImageEnv(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t)
+	writeFile(t, f.root.Path(sandbox.ImageEnvFile), "LANG=C.UTF-8\nLC_ALL=C.UTF-8\n")
+	f.sshUp(t, f.spec())
+	c := f.read(t, sandbox.SSHDConfig)
+	eq(t, strings.Contains(c, "SetEnv LANG=C.UTF-8 LC_ALL=C.UTF-8 SSL_CERT_FILE="), true)
+	eq(t, strings.Count(c, "SetEnv "), 1)
+}
