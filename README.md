@@ -285,8 +285,8 @@ command line. `authorize` holds at most 16 single lines.
 
 Our `sshd_config` has no `Include`. It listens on `127.0.0.1` only, lets in `user` alone, by key
 alone, with `UsePAM no`, and allows only local forwarding to loopback. Its one `SetEnv` line holds
-the lines of `/etc/bugnet/image.env`, `/etc/bugnet/env` and `/etc/bugnet/secrets.env`, and `egress apply` keeps it
-current. Under `--root`, its paths are mapped under the root.
+the lines of `/etc/bugnet/image.env`, `/etc/bugnet/env` and `/etc/bugnet/secrets.env`, and
+`egress apply` keeps it current. Under `--root`, its paths are mapped under the root.
 
 `harden --spec FILE` blocks the sandbox's outbound mail, private ranges, metadata addresses and
 mining pools. It runs as root and never under `--root`. It reads the spec and deletes it, even
