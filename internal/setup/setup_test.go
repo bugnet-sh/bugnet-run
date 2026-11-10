@@ -2,6 +2,9 @@ package setup
 
 import (
 	"bytes"
+	"context"
+	"encoding/base64"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -565,4 +568,161 @@ func TestSetupSamplerFailureNeverFailsSetup(t *testing.T) {
 	out, code := f.run(t, s)
 	eq(t, out, `{"gate":"listening","ca":"skipped","init":"setsid"}`)
 	eq(t, code, 0)
+}
+
+/* Reseed and the pool phase */
+
+func seed32(b byte) string {
+	return base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{b}, 32))
+}
+
+// stubRandom points setup at a file for the random device and records the ioctl's argument
+func stubRandom(t *testing.T, ioctl func(arg []byte) error) (path string, args *[][]byte) {
+	t.Helper()
+	path = filepath.Join(t.TempDir(), "urandom")
+	must(t, os.WriteFile(path, nil, 0o600))
+	var got [][]byte
+	oldPath, oldAdd := urandom, addEntropy
+	urandom = path
+	addEntropy = func(_ string, arg []byte) error {
+		got = append(got, arg)
+		return ioctl(arg)
+	}
+	t.Cleanup(func() { urandom, addEntropy = oldPath, oldAdd })
+	return path, &got
+}
+
+func TestSetupReseedBuildsTheIoctlArgument(t *testing.T) {
+	arg := entropyArg(bytes.Repeat([]byte{7}, 32))
+	eq(t, binary.NativeEndian.Uint32(arg[0:4]), uint32(256))
+	eq(t, binary.NativeEndian.Uint32(arg[4:8]), uint32(32))
+	eq(t, arg[8:], bytes.Repeat([]byte{7}, 32))
+}
+
+func TestSetupReseedsBeforeAnyOtherStep(t *testing.T) {
+	f := newFixture(t)
+	var seen bool
+	_, args := stubRandom(t, func([]byte) error {
+		seen = !exists(f.root.Path(sandbox.GateKeyFile)) && !exists(f.root.Path(sandbox.EtcDir))
+		return nil
+	})
+	s := f.spec()
+	s.Seed = seed32(7)
+	out, code := f.run(t, s)
+	eq(t, out, `{"gate":"listening","ca":"skipped","init":"setsid","reseed":"ioctl"}`)
+	eq(t, code, 0)
+	eq(t, len(*args), 1)
+	eq(t, seen, true)
+}
+
+func TestSetupReseedFallsBackToWrite(t *testing.T) {
+	f := newFixture(t)
+	path, _ := stubRandom(t, func([]byte) error { return syscall.EPERM })
+	s := f.spec()
+	s.Seed = seed32(5)
+	out, code := f.run(t, s)
+	eq(t, out, `{"gate":"listening","ca":"skipped","init":"setsid","reseed":"write"}`)
+	eq(t, code, 0)
+	eq(t, readFile(t, path), string(bytes.Repeat([]byte{5}, 32)))
+}
+
+func TestSetupReseedFailureNeverFailsSetup(t *testing.T) {
+	f := newFixture(t)
+	path, _ := stubRandom(t, func([]byte) error { return syscall.EPERM })
+	must(t, os.Remove(path))
+	s := f.spec()
+	s.Seed = seed32(5)
+	out, code := f.run(t, s)
+	eq(t, out, `{"gate":"listening","ca":"skipped","init":"setsid","reseed":"failed"}`)
+	eq(t, code, 0)
+}
+
+func TestSetupSeedIsOptional(t *testing.T) {
+	f := newFixture(t)
+	_, args := stubRandom(t, func([]byte) error { return nil })
+	out, _ := f.run(t, f.spec())
+	eq(t, strings.Contains(out, "reseed"), false)
+	eq(t, len(*args), 0)
+}
+
+func TestSetupBadSeedIsBadSpec(t *testing.T) {
+	f := newFixture(t)
+	for name, seed := range map[string]string{
+		"31 bytes":   base64.StdEncoding.EncodeToString(make([]byte, 31)),
+		"33 bytes":   base64.StdEncoding.EncodeToString(make([]byte, 33)),
+		"not base64": "!!!!",
+	} {
+		s := f.spec()
+		s.Seed = seed
+		out, code := f.run(t, s)
+		if out != `{"error":"bad_spec"}` || code != 1 {
+			t.Errorf("%s: printed %s and exited %d", name, out, code)
+		}
+	}
+}
+
+func TestSetupPoolPhaseWritesNoGateKey(t *testing.T) {
+	f := newFixture(t)
+	stubRandom(t, func([]byte) error { return nil })
+	fakeUpdateCA(t)
+	s := Spec{V: 1, Phase: PhasePool, Seed: seed32(3), PreviewDomain: "preview.example"}
+	s.CAPEM, s.CAVersion = testCA(t, "Bugnet dev CA"), 1
+	out, code := f.run(t, s)
+	eq(t, code, 0)
+	var ans map[string]any
+	must(t, json.Unmarshal([]byte(out), &ans))
+	eq(t, ans["gate"], nil)
+	eq(t, ans["reseed"], "ioctl")
+	eq(t, ans["ca"], "installed")
+	eq(t, exists(f.root.Path(sandbox.GateKeyFile)), false)
+	eq(t, exists(f.root.Path(sandbox.GateConfig)), false)
+	eq(t, exists(f.root.Path(sandbox.EnvFile)), true)
+	eq(t, f.healthy(testKey) != nil, true)
+}
+
+func TestSetupFullPhaseAfterPoolPhase(t *testing.T) {
+	f := newFixture(t)
+	fakeUpdateCA(t)
+	ca := testCA(t, "Bugnet dev CA")
+	pool := Spec{V: 1, Phase: PhasePool, CAPEM: ca, CAVersion: 1, PreviewDomain: "preview.example"}
+	_, code := f.run(t, pool)
+	eq(t, code, 0)
+	env := readFile(t, f.root.Path(sandbox.EnvFile))
+
+	full := f.spec()
+	full.CAPEM, full.CAVersion = ca, 1
+	out, code := f.run(t, full)
+	eq(t, code, 0)
+	eq(t, strings.Contains(out, `"gate":"listening"`), true)
+	eq(t, readFile(t, f.root.Path(sandbox.EnvFile)), env)
+	eq(t, readFile(t, f.root.Path(sandbox.GateKeyFile)), testKey+"\n")
+	must(t, f.healthy(testKey))
+}
+
+func TestSetupPoolPhaseNeedsNoGateFields(t *testing.T) {
+	f := newFixture(t)
+	_, code := f.run(t, Spec{V: 1, Phase: PhasePool})
+	eq(t, code, 0)
+	s := f.spec()
+	s.Phase = "warm"
+	out, code := f.run(t, s)
+	eq(t, out, `{"error":"bad_spec"}`)
+	eq(t, code, 1)
+}
+
+func TestSetupReloadsTheFirewallRules(t *testing.T) {
+	f := newFixture(t)
+	var roots []string
+	old := recheckFirewall
+	recheckFirewall = func(_ context.Context, r sandbox.Root, _ time.Time) (bool, error) {
+		roots = append(roots, r.Dir())
+		return true, nil
+	}
+	t.Cleanup(func() { recheckFirewall = old })
+	_, code := f.run(t, Spec{V: 1, Phase: PhasePool})
+	eq(t, code, 0)
+	eq(t, len(roots), 0)
+	_, code = f.run(t, f.spec())
+	eq(t, code, 0)
+	eq(t, roots, []string{f.root.Dir()})
 }

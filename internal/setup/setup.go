@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"crypto/x509"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
@@ -21,6 +22,7 @@ import (
 	"time"
 
 	"github.com/bugnet-sh/bugnet-run/internal/gate"
+	"github.com/bugnet-sh/bugnet-run/internal/harden"
 	"github.com/bugnet-sh/bugnet-run/internal/sandbox"
 )
 
@@ -36,14 +38,23 @@ type Spec struct {
 	PreviewDomain string `json:"preview_domain"`
 	// Sample starts the sampler, which a later setup without it leaves running
 	Sample bool `json:"sample"`
+	// Seed is 32 base64 bytes of router randomness, mixed into the kernel before any other step
+	Seed string `json:"seed"`
+	// Phase is "pool" for a member that only gets the CA and the env lines, else every step
+	Phase string `json:"phase"`
 }
+
+// PhasePool is Spec.Phase for a pool member, which gets no gate and no gate key
+const PhasePool = "pool"
 
 // Result is the one JSON line setup prints
 type Result struct {
-	Gate  string `json:"gate,omitempty"`
-	CA    string `json:"ca,omitempty"`
-	Init  string `json:"init,omitempty"`
-	Error string `json:"error,omitempty"`
+	Gate string `json:"gate,omitempty"`
+	CA   string `json:"ca,omitempty"`
+	Init string `json:"init,omitempty"`
+	// Reseed says how the seed reached the kernel, ioctl, write or failed, empty without a seed
+	Reseed string `json:"reseed,omitempty"`
+	Error  string `json:"error,omitempty"`
 }
 
 // Values of Result.Error, a file that cannot be written counting as gate_failed
@@ -72,6 +83,8 @@ var (
 	updateCA   = runUpdateCA
 	systemctl  func(ctx context.Context, args ...string) error
 	healthWait = 10 * time.Second
+	// recheckFirewall loads the kept ruleset again when its table is gone
+	recheckFirewall = harden.Recheck
 )
 
 var errNoUpdater = errors.New("update-ca-certificates is not available")
@@ -127,6 +140,7 @@ func run(ctx context.Context, args []string, stderr io.Writer) (Result, error) {
 	if err != nil {
 		return Result{}, fail(ErrBadSpec, err)
 	}
+	var res Result
 	var spec *Spec
 	switch {
 	case *specPath != "":
@@ -135,6 +149,8 @@ func run(ctx context.Context, args []string, stderr io.Writer) (Result, error) {
 			return Result{}, fail(ErrBadSpec, err)
 		}
 		spec = &s
+		// Nothing else runs before the kernel has the router's bytes
+		res.Reseed = reseed(s.Seed)
 	case !*repair:
 		return Result{}, fail(ErrBadSpec, errors.New("missing --spec"))
 	}
@@ -151,17 +167,23 @@ func run(ctx context.Context, args []string, stderr io.Writer) (Result, error) {
 	}
 	defer unlock()
 
+	if spec != nil && spec.Phase == PhasePool {
+		return poolPhase(ctx, root, *spec, res)
+	}
 	cfg, key, changed, err := gateFiles(root, spec)
 	if err != nil {
 		return Result{}, err
 	}
-	var res Result
 	if !*repair {
 		if res.CA, err = installCA(ctx, root, *spec); err != nil {
 			return Result{}, fail(ErrCAMismatch, err)
 		}
 		if err := writeEnv(root, *spec, res.CA); err != nil {
 			return Result{}, fail(ErrGateFailed, err)
+		}
+		// A park may have lost the firewall table, and nothing but setup runs before the jobs
+		if _, err := recheckFirewall(ctx, root, time.Now()); err != nil {
+			_, _ = fmt.Fprintf(stderr, "bugnet-run setup: firewall: %v\n", err)
 		}
 	}
 	// Units start from the copy, so a /tmp emptied at boot never takes their binary away
@@ -179,6 +201,19 @@ func run(ctx context.Context, args []string, stderr io.Writer) (Result, error) {
 		}
 	}
 	res.Gate, res.Init = "listening", string(sup.Init())
+	return res, nil
+}
+
+// poolPhase installs the CA and writes the env lines, which a member needs before any claim
+func poolPhase(ctx context.Context, root sandbox.Root, spec Spec, res Result) (Result, error) {
+	var err error
+	if res.CA, err = installCA(ctx, root, spec); err != nil {
+		return Result{}, fail(ErrCAMismatch, err)
+	}
+	if err := writeEnv(root, spec, res.CA); err != nil {
+		return Result{}, fail(ErrGateFailed, err)
+	}
+	res.Init = string((sandbox.Supervisor{Root: root, Systemctl: systemctl}).Init())
 	return res, nil
 }
 
@@ -218,11 +253,24 @@ func (s Spec) validate() error {
 	if s.V != 1 {
 		return fmt.Errorf("spec version %d", s.V)
 	}
-	if !gate.ValidKey(s.GateKey) {
-		return errors.New("gate_key is not 43 base64url characters")
+	if s.Phase != "" && s.Phase != PhasePool {
+		return errors.New("phase is neither empty nor pool")
 	}
-	if _, err := gate.ListenPort(s.GateListen); err != nil {
-		return err
+	if s.Seed != "" {
+		if b, err := base64.StdEncoding.DecodeString(s.Seed); err != nil || len(b) != seedLen {
+			return errors.New("seed is not 32 base64 bytes")
+		}
+	}
+	// A pool member has no gate yet, so its spec may leave both out
+	if s.Phase != PhasePool || s.GateKey != "" {
+		if !gate.ValidKey(s.GateKey) {
+			return errors.New("gate_key is not 43 base64url characters")
+		}
+	}
+	if s.Phase != PhasePool || s.GateListen != "" {
+		if _, err := gate.ListenPort(s.GateListen); err != nil {
+			return err
+		}
 	}
 	for _, p := range s.DenyPorts {
 		if p < 1 || p > 65535 {

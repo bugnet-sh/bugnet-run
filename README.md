@@ -79,6 +79,10 @@ These run as root. `--root DIR` maps every sandbox path under `DIR`, for the `lo
 
 `setup --spec FILE [--root DIR] [--repair]` reads the spec, deletes it, and then:
 
+0. With `"seed"` (32 bytes, base64), adds the bytes to the kernel's random pool with the
+   `RNDADDENTROPY` ioctl on `/dev/urandom`, crediting 256 bits, then forces `RNDRESEEDCRNG`. On
+   an error it writes the bytes to `/dev/urandom` instead. The answer's `reseed` is `ioctl`,
+   `write` or `failed`, and a failure never fails setup. Every phase does this first.
 1. Writes `/etc/bugnet/gate.key` (0600) and `/etc/bugnet/gate.json` (0644).
 2. Installs the Bugnet CA as `/usr/local/share/ca-certificates/bugnet-egress-v<N>.crt`.
 3. Writes `/etc/bugnet/env` and `/etc/profile.d/bugnet.sh`.
@@ -107,6 +111,11 @@ The `ca` values:
 | `appended` | Another version is already installed, so the PEM is appended to the bundle |
 | `checked` | `ca_pem` is empty and the baked file matches `ca_sha256` |
 | `skipped` | Both are empty, and `/etc/bugnet/env` then holds no CA lines |
+
+With `"phase": "pool"` only steps 0, 2 and 3 run. The spec needs no gate key or listen address,
+the answer has no `gate`, and the gate, its files and the sampler wait for the full phase that
+claims the sandbox. Without `phase`, every step runs. Before step 5 a full phase loads the kept
+firewall rules again when their table is gone, as a hibernated sandbox may lose it.
 
 A second run with the same spec changes nothing and keeps the same gate process. A new key or
 config restarts the gate. `--repair` redoes only steps 1, 4 and 5. Without `--spec`, it keeps the
