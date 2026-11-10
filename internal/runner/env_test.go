@@ -64,6 +64,15 @@ func TestPrepareLoadsEnvFiles(t *testing.T) {
 	eq(t, has(env, "9X"), false)
 }
 
+func TestPrepareLoadsImageEnvFirst(t *testing.T) {
+	t.Parallel()
+	env := prepared(t, files{"/etc/bugnet/image.env": "LANG=C.UTF-8\nA=1\nI=img\n",
+		"/etc/bugnet/env": "A=2\n"})
+	eq(t, env["LANG"], "C.UTF-8")
+	eq(t, env["A"], "2")
+	eq(t, env["I"], "img")
+}
+
 func TestPrepareReadsEnvFilesAtEveryStart(t *testing.T) {
 	t.Parallel()
 	env := prepared(t, files{"/etc/bugnet/secrets.env": "HF_TOKEN=bnsec_x\n"})
