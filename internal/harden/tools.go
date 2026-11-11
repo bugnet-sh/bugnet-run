@@ -113,19 +113,19 @@ func (h hardener) loadIptables(ctx context.Context, v4, v6 string, uplinks []str
 	if err == nil || !h.ipv6() {
 		return nil
 	}
-	k := h.keptIptables()
+	k := h.keptIptables(uplinks)
 	return errors.Join(err, h.restore(ctx, "iptables", k.v4, k.uplinks))
 }
 
-// keptIptables is the iptables ruleset kept, or an empty chain when none is kept
-func (h hardener) keptIptables() kept {
+// keptIptables is the iptables ruleset kept, or else an empty chain with the jumps for uplinks
+func (h hardener) keptIptables(uplinks []string) kept {
 	b, err := os.ReadFile(h.root.Path(RulesFile))
 	if err == nil {
 		if k, err := parseKept(b); err == nil && k.firewall == FirewallIptables {
 			return k
 		}
 	}
-	return kept{firewall: FirewallIptables, v4: emptyChain}
+	return kept{firewall: FirewallIptables, v4: emptyChain, uplinks: uplinks}
 }
 
 // jumpRules send OUTPUT to BUGNET, and FORWARD only by an uplink unless none was found

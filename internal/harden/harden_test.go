@@ -676,25 +676,58 @@ func TestIptablesLoadsBothChainsOrNeither(t *testing.T) {
 	must(t, err)
 	eq(t, string(after), string(kept))
 
-	// With no iptables ruleset kept, the IPv4 chain is left empty
-	for _, earlier := range []string{"", "# bugnet-run harden nft\ntable inet bugnet\n"} {
-		g := newFixture(t, procFile("net/if_inet6", "x"))
-		g.fakes = newFakeTools("iptables")
-		g.fakes.answer = f.fakes.answer
-		g.h.tools = g.fakes.tools()
-		if earlier != "" {
-			writeFile(t, g.h.root.Path(RulesFile), earlier)
+	// fresh answers as iptables with no jump to BUGNET yet, each one present once inserted
+	fresh := func() func(c call) (string, error) {
+		jumps := map[string]bool{}
+		return func(c call) (string, error) {
+			if c.name == "ip6tables-restore" {
+				return "ip6tables-restore: line 3 failed", errors.New("exit status 1")
+			}
+			if len(c.args) < 3 {
+				return "", nil
+			}
+			// An insert names its position after the chain, which a check leaves out
+			at := 3
+			if c.args[1] == "-I" {
+				at = 4
+			}
+			key := strings.Join(slices.Concat([]string{c.name, c.args[2]}, c.args[at:]), " ")
+			if c.args[1] == "-I" {
+				jumps[key] = true
+			} else if !jumps[key] {
+				return "", errors.New("exit status 1")
+			}
+			return "", nil
 		}
-		eq(t, g.run(t), `{"error":"firewall_unavailable"}`)
-		calls := g.fakes.take()
-		eq(t, names(calls)[4], "iptables-restore --noflush")
-		eq(t, calls[4].stdin, "*filter\n:BUGNET - [0:0]\nCOMMIT\n")
-		got, err := os.ReadFile(g.h.root.Path(RulesFile))
-		if earlier == "" {
-			eq(t, errors.Is(err, os.ErrNotExist), true)
-		} else {
-			must(t, err)
-			eq(t, string(got), earlier)
+	}
+
+	// With no iptables ruleset kept, the IPv4 chain is left empty behind the jumps the load made
+	for _, earlier := range []string{"", "# bugnet-run harden nft\ntable inet bugnet\n"} {
+		for _, c := range []struct{ routes, by string }{{"", ""}, {routeTable, " -o eth0"}} {
+			g := newFixture(t, procFile("net/if_inet6", "x"), procFile("net/route", c.routes))
+			g.fakes = newFakeTools("iptables")
+			g.fakes.answer = fresh()
+			g.h.tools = g.fakes.tools()
+			if earlier != "" {
+				writeFile(t, g.h.root.Path(RulesFile), earlier)
+			}
+			eq(t, g.run(t), `{"error":"firewall_unavailable"}`)
+			calls := g.fakes.take()
+			check := "iptables -w -C FORWARD" + c.by + " -j BUGNET"
+			eq(t, names(calls), []string{
+				"iptables-restore --noflush", "iptables -w -C OUTPUT -j BUGNET",
+				"iptables -w -I OUTPUT 1 -j BUGNET", check,
+				"iptables -w -I FORWARD 1" + c.by + " -j BUGNET", "ip6tables-restore --noflush",
+				"iptables-restore --noflush", "iptables -w -C OUTPUT -j BUGNET", check,
+			})
+			eq(t, calls[6].stdin, "*filter\n:BUGNET - [0:0]\nCOMMIT\n")
+			got, err := os.ReadFile(g.h.root.Path(RulesFile))
+			if earlier == "" {
+				eq(t, errors.Is(err, os.ErrNotExist), true)
+			} else {
+				must(t, err)
+				eq(t, string(got), earlier)
+			}
 		}
 	}
 }
