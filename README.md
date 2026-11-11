@@ -294,11 +294,12 @@ when the spec or an argument after `--spec` is wrong:
 
 ```json
 {"v": 1, "mail_ports": [25, 465, 587], "deny_ranges": ["10.0.0.0/8", "fe80::/10"],
- "pools": ["198.51.100.0/24"], "allow": ["203.0.113.7"]}
+ "pools": ["198.51.100.0/24"], "allow": ["203.0.113.7"], "no_gateway": false}
 ```
 
 Every entry of `deny_ranges`, `pools` and `allow` is a CIDR or a bare address. `pools` holds at
-most 10,000 entries, the others at most 1,000 and `mail_ports` at most 64.
+most 10,000 entries, the others at most 1,000 and `mail_ports` at most 64. `no_gateway` is for a
+provider whose default gateway is its own host, and it is false when left out.
 
 The rules apply to outbound traffic only. These are allowed first, in this order:
 
@@ -306,7 +307,8 @@ The rules apply to outbound traffic only. These are allowed first, in this order
 - TCP and UDP port 53 of each `nameserver` in `/etc/resolv.conf` and
   `/run/systemd/resolve/resolv.conf`, so a resolver in `10.0.0.0/8` keeps working.
 - The next hop of each default route in `/proc/net/route` and `/proc/net/ipv6_route`, the
-  default gateway even in a private range.
+  default gateway even in a private range. With `no_gateway` true the gateway gets no accept and
+  falls under `deny_ranges` like any other address, while a resolver there keeps port 53.
 - DHCP renewals (UDP 68 to 67, and 546 to 547), and IPv6 neighbour solicitations, neighbour
   adverts and router solicitations, so the lease and IPv6 routing survive the blocks.
 - Each `allow` entry, the provider's own control addresses.
