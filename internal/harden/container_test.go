@@ -166,6 +166,9 @@ func TestContainerHardenTwiceOneTable(t *testing.T) {
 			refusedFast(t, id, addr)
 			// The resolver docker hands out sits in a private range, and must still answer
 			inContainer(t, id, "getent hosts deb.debian.org")
+			// A check that finds every chain loaded leaves the table alone
+			inContainer(t, id, "touch -d '2 minutes ago' /run/bugnet/firewall.checked")
+			eq(t, inContainer(t, id, "bugnet-run respawn"), `{"started":[]}`)
 
 			inContainer(t, id, "nft delete table inet bugnet && "+
 				"echo > /run/bugnet/firewall.checked && touch -d '2 minutes ago' "+
@@ -214,6 +217,8 @@ func TestContainerHardenWithIptables(t *testing.T) {
 			}
 			refusedFast(t, id, addr)
 			inContainer(t, id, "getent hosts deb.debian.org")
+			inContainer(t, id, "touch -d '2 minutes ago' /run/bugnet/firewall.checked")
+			eq(t, inContainer(t, id, "bugnet-run respawn"), `{"started":[]}`)
 
 			inContainer(t, id, "iptables -D OUTPUT -j BUGNET && "+
 				"touch -d '2 minutes ago' /run/bugnet/firewall.checked")
