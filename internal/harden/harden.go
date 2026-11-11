@@ -27,6 +27,8 @@ type Spec struct {
 	Pools []string `json:"pools"`
 	// Allow holds the provider's own addresses, reachable before any block
 	Allow []string `json:"allow"`
+	// NoGateway leaves the default gateways under the blocks, for a gateway that is the host
+	NoGateway bool `json:"no_gateway"`
 }
 
 // Result is the one JSON line harden prints

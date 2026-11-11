@@ -41,9 +41,12 @@ type rules struct {
 // rules builds the ruleset of a spec that passed check
 func (h hardener) rules(s Spec) rules {
 	r := rules{
-		resolvers: h.resolvers(), gateways: h.gateways(), allow: prefixes(s.Allow),
+		resolvers: h.resolvers(), allow: prefixes(s.Allow),
 		deny: prefixes(s.DenyRanges), mailPorts: slices.Compact(slices.Sorted(slices.Values(
 			s.MailPorts))),
+	}
+	if !s.NoGateway {
+		r.gateways = h.gateways()
 	}
 	for _, p := range merge(prefixes(s.Pools)) {
 		if p.Addr().Is4() {

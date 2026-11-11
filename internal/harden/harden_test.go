@@ -129,6 +129,48 @@ func TestDefaultGatewaysStayReachable(t *testing.T) {
 		index(t, v6, "-A BUGNET -d fe80::/10 -p tcp -j REJECT"), true)
 }
 
+// A gateway that is the provider's host falls under the private-range blocks
+func TestHardenNoGateway(t *testing.T) {
+	t.Parallel()
+	opts := spec(resolvConf("nameserver 10.0.0.1\n"), procFile("net/route", routeTable),
+		procFile("net/ipv6_route", ipv6RouteTable))
+	noGateway := withSpec(func(s *Spec) { s.NoGateway = true })
+	v4, v6 := buildIptables(t, opts)
+	offV4, offV6 := buildIptables(t, opts, noGateway)
+	for _, c := range []struct {
+		kept, dropped string
+		accepts       []string
+	}{
+		{buildNft(t, opts), buildNft(t, opts, noGateway),
+			[]string{"\t\tip daddr 10.0.0.1 accept\n", "\t\tip6 daddr fe80::1 accept\n"}},
+		{v4, offV4, []string{"-A BUGNET -d 10.0.0.1/32 -j ACCEPT\n"}},
+		{v6, offV6, []string{"-A BUGNET -d fe80::1/128 -j ACCEPT\n"}},
+	} {
+		// The default keeps each gateway accept, and no_gateway drops those lines alone
+		want := c.kept
+		for _, line := range c.accepts {
+			index(t, c.kept, line)
+			want = strings.ReplaceAll(want, line, "")
+		}
+		eq(t, c.dropped, want)
+	}
+
+	// The resolver at the gateway still answers, and every other port of it is rejected
+	rs := buildNft(t, opts, noGateway)
+	eq(t, index(t, rs, "ip daddr 10.0.0.1 udp dport 53 accept") <
+		index(t, rs, "ip daddr 10.0.0.0/8 meta l4proto tcp reject with tcp reset"), true)
+	eq(t, index(t, offV4, "-A BUGNET -d 10.0.0.1/32 -p tcp -m tcp --dport 53 -j ACCEPT") <
+		index(t, offV4, "-A BUGNET -d 10.0.0.0/8 -p tcp -j REJECT"), true)
+
+	f := newFixture(t, opts...)
+	eq(t, f.runRaw(t, []byte(`{"v":1,"deny_ranges":["10.0.0.0/8"],"no_gateway":true}`)),
+		`{"firewall":"nft"}`)
+	calls := f.fakes.take()
+	eq(t, names(calls), []string{"nft -f FILE"})
+	eq(t, strings.Contains(calls[0].stdin, "daddr 10.0.0.1 accept"), false)
+	index(t, calls[0].stdin, "ip daddr 10.0.0.0/8 meta l4proto tcp reject with tcp reset")
+}
+
 func TestNeighbourDiscoveryAndDHCPStayOpen(t *testing.T) {
 	t.Parallel()
 	rs := buildNft(t, spec())
