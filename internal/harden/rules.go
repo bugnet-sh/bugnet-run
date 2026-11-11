@@ -9,6 +9,7 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -21,8 +22,14 @@ const (
 	ipv6Marker     = "# ipv6\n"
 )
 
-// maxHostAddrs bounds the resolvers and the gateways read from the sandbox
+// maxHostAddrs bounds the resolvers, the gateways and the uplinks read from the sandbox
 const maxHostAddrs = 16
+
+// rtfReject flags an unreachable or prohibit route, which sends nothing out
+const rtfReject = 0x0200
+
+// ifname matches an interface name that nft and iptables read as a plain name
+var ifname = regexp.MustCompile(`^[A-Za-z0-9_][A-Za-z0-9_.-]{0,14}$`)
 
 // resolvConfs are read for resolvers, the second holding systemd-resolved's upstream servers
 var resolvConfs = []string{"/etc/resolv.conf", "/run/systemd/resolve/resolv.conf"}
@@ -31,6 +38,8 @@ var resolvConfs = []string{"/etc/resolv.conf", "/run/systemd/resolve/resolv.conf
 type rules struct {
 	resolvers []netip.Addr
 	gateways  []netip.Addr
+	// uplinks carry the default routes, the one way forwarded traffic leaves the sandbox
+	uplinks   []string
 	allow     []netip.Prefix
 	mailPorts []int
 	deny      []netip.Prefix
@@ -40,13 +49,14 @@ type rules struct {
 
 // rules builds the ruleset of a spec that passed check
 func (h hardener) rules(s Spec) rules {
+	routes := h.defaultRoutes()
 	r := rules{
-		resolvers: h.resolvers(), allow: prefixes(s.Allow),
+		resolvers: h.resolvers(), uplinks: uplinks(routes), allow: prefixes(s.Allow),
 		deny: prefixes(s.DenyRanges), mailPorts: slices.Compact(slices.Sorted(slices.Values(
 			s.MailPorts))),
 	}
 	if !s.NoGateway {
-		r.gateways = h.gateways()
+		r.gateways = gateways(routes)
 	}
 	for _, p := range merge(prefixes(s.Pools)) {
 		if p.Addr().Is4() {
@@ -127,33 +137,76 @@ func (h hardener) resolvers() []netip.Addr {
 	return out
 }
 
-// gateways reads the next hops of the default routes in /proc/net/route and ipv6_route
-func (h hardener) gateways() []netip.Addr {
-	var out []netip.Addr
+// route is a default route, with its next hop left invalid when it has none
+type route struct {
+	dev    string
+	reject bool
+	via    netip.Addr
+}
+
+// defaultRoutes reads the default routes in /proc/net/route and ipv6_route
+func (h hardener) defaultRoutes() []route {
+	var out []route
 	for _, f := range fields(filepath.Join(h.procDir, "net", "route")) {
 		if len(f) < 8 || f[1] != "00000000" || f[7] != "00000000" {
 			continue
 		}
-		v, err := strconv.ParseUint(f[2], 16, 32)
-		if err != nil || v == 0 {
-			continue
+		r := route{dev: f[0], reject: rejects(f[3])}
+		if v, err := strconv.ParseUint(f[2], 16, 32); err == nil && v != 0 {
+			// The kernel prints the address as a number in host order
+			var a [4]byte
+			binary.NativeEndian.PutUint32(a[:], uint32(v))
+			r.via = netip.AddrFrom4(a)
 		}
-		// The kernel prints the address as a number in host order
-		var a [4]byte
-		binary.NativeEndian.PutUint32(a[:], uint32(v))
-		out = appendAddr(out, netip.AddrFrom4(a))
+		out = append(out, r)
 	}
 	for _, f := range fields(filepath.Join(h.procDir, "net", "ipv6_route")) {
 		if len(f) < 10 || f[0] != strings.Repeat("0", 32) || f[1] != "00" {
 			continue
 		}
-		b, err := hex.DecodeString(f[4])
-		if err != nil || len(b) != 16 {
+		r := route{dev: f[9], reject: rejects(f[8])}
+		if b, err := hex.DecodeString(f[4]); err == nil && len(b) == 16 {
+			r.via = netip.AddrFrom16([16]byte(b))
+		}
+		out = append(out, r)
+	}
+	return out
+}
+
+func rejects(flags string) bool {
+	v, err := strconv.ParseUint(flags, 16, 32)
+	return err == nil && v&rtfReject != 0
+}
+
+// gateways are the next hops of the default routes
+func gateways(routes []route) []netip.Addr {
+	var out []netip.Addr
+	for _, r := range routes {
+		if r.via.IsValid() && !r.via.IsUnspecified() {
+			out = appendAddr(out, r.via)
+		}
+	}
+	return out
+}
+
+// uplinks names the devices of the default routes, or none when one cannot be named safely
+func uplinks(routes []route) []string {
+	var out []string
+	for _, r := range routes {
+		// A blackhole route prints no device
+		if r.reject || r.dev == "*" {
 			continue
 		}
-		if a := netip.AddrFrom16([16]byte(b)); !a.IsUnspecified() {
-			out = appendAddr(out, a)
+		// Leaving out a device would pass what leaves by it, so every forward stays filtered
+		if !ifname.MatchString(r.dev) {
+			return nil
 		}
+		out = append(out, r.dev)
+	}
+	slices.Sort(out)
+	out = slices.Compact(out)
+	if len(out) > maxHostAddrs {
+		return nil
 	}
 	return out
 }
@@ -179,7 +232,7 @@ func appendAddr(out []netip.Addr, a netip.Addr) []netip.Addr {
 
 /* nftables */
 
-// hooks are filtered alike, forward carrying what Docker or a nested namespace sends
+// hooks share the blocks, forward carrying what Docker or a nested namespace sends
 var hooks = []string{"output", "forward"}
 
 // nft replaces the whole table in one transaction, so a second load leaves one table
@@ -189,11 +242,15 @@ func (r rules) nft() string {
 	b.WriteString("table inet bugnet\ndelete table inet bugnet\ntable inet bugnet {\n")
 	writeSet(&b, "pools4", "ipv4_addr", r.pools4)
 	writeSet(&b, "pools6", "ipv6_addr", r.pools6)
-	rules := r.nftRules()
+	body := r.nftRules()
 	for _, hook := range hooks {
 		fmt.Fprintf(&b, "\tchain %s {\n\t\ttype filter hook %s priority 0; policy accept;\n",
 			hook, hook)
-		for _, rule := range rules {
+		// The blocks are for traffic leaving the sandbox, so what it forwards inside passes
+		if hook == "forward" && len(r.uplinks) > 0 {
+			b.WriteString("\t\toifname != { \"" + strings.Join(r.uplinks, `", "`) + "\" } accept\n")
+		}
+		for _, rule := range body {
 			b.WriteString("\t\t" + rule + "\n")
 		}
 		b.WriteString("\t}\n")

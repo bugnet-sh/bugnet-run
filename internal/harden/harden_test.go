@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -207,29 +208,104 @@ func TestEveryBlockOfTheSpec(t *testing.T) {
 // Docker or a nested namespace in the sandbox sends through forward, which output never sees
 func TestForwardChainCarriesTheOutputRules(t *testing.T) {
 	t.Parallel()
-	for name, opts := range map[string][]option{
-		"defaults": spec(),
-		"e2b":      spec(withSpec(func(s *Spec) { s.DenyRanges, s.Pools = nil, nil })),
-		"addresses": spec(resolvConf("nameserver 10.0.0.2\n"), procFile("net/route", routeTable),
+	for name, c := range map[string]struct {
+		opts []option
+		// stays is the forward chain's first rule, which passes what leaves by no uplink
+		stays string
+	}{
+		"defaults": {spec(), ""},
+		"e2b":      {spec(withSpec(func(s *Spec) { s.DenyRanges, s.Pools = nil, nil })), ""},
+		"addresses": {spec(resolvConf("nameserver 10.0.0.2\n"), procFile("net/route", routeTable),
 			withSpec(func(s *Spec) {
 				s.Allow = []string{"10.9.0.0/16"}
 				s.Pools = []string{"198.51.100.0/24", "2001:db8:bad::/48"}
-			})),
+			})), "\t\toifname != { \"eth0\" } accept\n"},
+		"two uplinks": {spec(procFile("net/route", routeTable),
+			procFile("net/ipv6_route", wg0RouteTable)),
+			"\t\toifname != { \"eth0\", \"wg0\" } accept\n"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
-			r := ruleset(t, opts)
+			r := ruleset(t, c.opts)
 			rs := r.nft()
 			body := "\t\t" + strings.Join(r.nftRules(), "\n\t\t") + "\n\t}\n"
 			output := index(t, rs, "\tchain output {\n"+
 				"\t\ttype filter hook output priority 0; policy accept;\n"+body)
 			forward := index(t, rs, "\tchain forward {\n"+
-				"\t\ttype filter hook forward priority 0; policy accept;\n"+body)
+				"\t\ttype filter hook forward priority 0; policy accept;\n"+c.stays+body)
 			eq(t, output < forward, true)
 			eq(t, strings.Count(rs, "\tchain "), 2)
+			eq(t, strings.Count(rs, "oifname !="), strings.Count(c.stays, "oifname !="))
 			eq(t, strings.HasSuffix(rs, "\t}\n}\n"), true)
 		})
 	}
+}
+
+// wg0RouteTable has an IPv6 default route out of wg0 with no next hop
+const wg0RouteTable = "" +
+	"00000000000000000000000000000000 00 00000000000000000000000000000000 00 " +
+	"00000000000000000000000000000000 00000400 00000001 00000000 00000001 wg0\n"
+
+// ipv4Route is a line of /proc/net/route for a route through gateway on dev with flags
+func ipv4Route(dev, dest, gateway, flags, mask string) string {
+	return dev + "\t" + dest + "\t" + gateway + "\t" + flags + "\t0\t0\t0\t" + mask + "\t0\t0\t0\n"
+}
+
+// An uplink carries a default route, the one way forwarded traffic leaves the sandbox
+func TestUplinksFromTheDefaultRoutes(t *testing.T) {
+	t.Parallel()
+	header := strings.SplitAfter(routeTable, "\n")[0]
+	many := header
+	for i := range 17 {
+		many += ipv4Route("eth"+strconv.Itoa(i), "00000000", "0100000A", "0003", "00000000")
+	}
+	unreachable := ipv4Route("*", "00000000", "00000000", "0201", "00000000")
+	blackhole := ipv4Route("*", "00000000", "00000000", "0001", "00000000")
+	for name, c := range map[string]struct {
+		route, route6 string
+		want          []string
+	}{
+		"no routes": {"", "", nil},
+		"one":       {routeTable, ipv6RouteTable, []string{"eth0"}},
+		"two":       {routeTable, wg0RouteTable, []string{"eth0", "wg0"}},
+		"two of ipv4": {routeTable + ipv4Route("eth1", "00000000", "0101A8C0", "0003", "00000000"),
+			"", []string{"eth0", "eth1"}},
+		"link routes alone": {header + ipv4Route("eth0", "0000000A", "00000000", "0001",
+			"00FFFFFF"), "", nil},
+		"rejects and blackholes": {header + unreachable + blackhole,
+			strings.SplitAfter(ipv6RouteTable, "\n")[1], nil},
+		"sixteen": {strings.Join(strings.SplitAfter(many, "\n")[:17], ""), "",
+			[]string{"eth0", "eth1", "eth10", "eth11", "eth12", "eth13", "eth14", "eth15", "eth2",
+				"eth3", "eth4", "eth5", "eth6", "eth7", "eth8", "eth9"}},
+		// Leaving out a device that carries a default route would pass what leaves by it
+		"seventeen": {many, "", nil},
+		"unsafe name": {routeTable + ipv4Route(`e"0`, "00000000", "0101A8C0", "0003",
+			"00000000"), "", nil},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			opts := spec()
+			if c.route != "" {
+				opts = append(opts, procFile("net/route", c.route))
+			}
+			if c.route6 != "" {
+				opts = append(opts, procFile("net/ipv6_route", c.route6))
+			}
+			eq(t, ruleset(t, opts).uplinks, c.want)
+		})
+	}
+
+	// A default route with no next hop names an uplink and no gateway
+	r := ruleset(t, spec(procFile("net/route", routeTable), procFile("net/ipv6_route",
+		wg0RouteTable)))
+	eq(t, len(r.gateways), 1)
+	eq(t, r.gateways[0].String(), "10.0.0.1")
+	// no_gateway drops the gateways and keeps the uplinks
+	r = ruleset(t, spec(procFile("net/route", routeTable), withSpec(func(s *Spec) {
+		s.NoGateway = true
+	})))
+	eq(t, len(r.gateways), 0)
+	eq(t, r.uplinks, []string{"eth0"})
 }
 
 func TestPoolsCapped(t *testing.T) {
