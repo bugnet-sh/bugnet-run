@@ -115,8 +115,13 @@ The `ca` values:
 
 With `"phase": "pool"` only steps 0, 2 and 3 run. The spec needs no gate key or listen address,
 the answer has no `gate`, and the gate, its files and the sampler wait for the full phase that
-claims the sandbox. Without `phase`, every step runs. Before step 5 a full phase loads the kept
-firewall rules again when their table is gone, as a hibernated sandbox may lose it.
+claims the sandbox. Without `phase`, every step runs. Before step 4 the full and `nogate` phases
+load the kept firewall rules again when their table is gone, as a hibernated sandbox may lose it.
+
+With `"phase": "nogate"` every step but 1 and 5 runs, for a sandbox that never has a gate, such
+as one on a provider with its own sshd. The spec must leave out `gate_key` and `gate_listen`, and
+`--repair` refuses it, both as `bad_spec`. The answer has no `gate`. With no
+`/etc/bugnet/gate.json`, neither `respawn` nor `start` ever starts a gate.
 
 A second run with the same spec changes nothing and keeps the same gate process. A new key or
 config restarts the gate. `--repair` redoes only steps 1, 4 and 5. Without `--spec`, it keeps the
