@@ -123,7 +123,7 @@ func (h hardener) keptV4() string {
 	return emptyChain
 }
 
-// restore refills the BUGNET chain and makes OUTPUT jump to it once
+// restore refills the BUGNET chain and makes the chain of each hook jump to it once
 func (h hardener) restore(ctx context.Context, tool, text string) error {
 	restore, ok := h.tools.look(tool + "-restore")
 	if !ok {
@@ -132,23 +132,39 @@ func (h hardener) restore(ctx context.Context, tool, text string) error {
 	if _, err := h.tools.run(ctx, []byte(text), restore, "--noflush"); err != nil {
 		return err
 	}
-	if h.jumps(ctx, tool) {
-		return nil
+	for _, hook := range hooks {
+		chain := strings.ToUpper(hook)
+		if h.jumps(ctx, tool, chain) {
+			continue
+		}
+		path, ok := h.tools.look(tool)
+		if !ok {
+			return fmt.Errorf("%s is not installed", tool)
+		}
+		_, err := h.tools.run(ctx, nil, path, "-w", "-I", chain, "1", "-j", "BUGNET")
+		if err != nil {
+			return err
+		}
 	}
-	path, ok := h.tools.look(tool)
-	if !ok {
-		return fmt.Errorf("%s is not installed", tool)
-	}
-	_, err := h.tools.run(ctx, nil, path, "-w", "-I", "OUTPUT", "1", "-j", "BUGNET")
-	return err
+	return nil
 }
 
-func (h hardener) jumps(ctx context.Context, tool string) bool {
+// hooked reports whether the chain of every hook jumps to BUGNET
+func (h hardener) hooked(ctx context.Context, tool string) bool {
+	for _, hook := range hooks {
+		if !h.jumps(ctx, tool, strings.ToUpper(hook)) {
+			return false
+		}
+	}
+	return true
+}
+
+func (h hardener) jumps(ctx context.Context, tool, chain string) bool {
 	path, ok := h.tools.look(tool)
 	if !ok {
 		return false
 	}
-	_, err := h.tools.run(ctx, nil, path, "-w", "-C", "OUTPUT", "-j", "BUGNET")
+	_, err := h.tools.run(ctx, nil, path, "-w", "-C", chain, "-j", "BUGNET")
 	return err == nil
 }
 
@@ -181,7 +197,7 @@ func parseKept(b []byte) (kept, error) {
 // present reports whether the table the kept ruleset makes is still loaded
 func (h hardener) present(ctx context.Context, k kept) bool {
 	if k.firewall == FirewallIptables {
-		return h.jumps(ctx, "iptables") && (!h.ipv6() || h.jumps(ctx, "ip6tables"))
+		return h.hooked(ctx, "iptables") && (!h.ipv6() || h.hooked(ctx, "ip6tables"))
 	}
 	nft, ok := h.tools.look("nft")
 	if !ok {

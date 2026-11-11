@@ -297,25 +297,44 @@ func TestHardenFallsBackToIptables(t *testing.T) {
 	calls := f.fakes.take()
 	eq(t, names(calls), []string{
 		"iptables-restore --noflush", "iptables -w -C OUTPUT -j BUGNET",
-		"iptables -w -I OUTPUT 1 -j BUGNET",
+		"iptables -w -I OUTPUT 1 -j BUGNET", "iptables -w -C FORWARD -j BUGNET",
+		"iptables -w -I FORWARD 1 -j BUGNET",
 		"ip6tables-restore --noflush", "ip6tables -w -C OUTPUT -j BUGNET",
-		"ip6tables -w -I OUTPUT 1 -j BUGNET",
+		"ip6tables -w -I OUTPUT 1 -j BUGNET", "ip6tables -w -C FORWARD -j BUGNET",
+		"ip6tables -w -I FORWARD 1 -j BUGNET",
 	})
 	v4, v6 := f.h.rules(f.spec).iptables()
 	eq(t, calls[0].stdin, v4)
-	eq(t, calls[3].stdin, v6)
+	eq(t, calls[5].stdin, v6)
 	eq(t, strings.HasPrefix(v4, "*filter\n:BUGNET - [0:0]\n"), true)
 	eq(t, strings.HasSuffix(v4, "COMMIT\n"), true)
 	b, err := os.ReadFile(f.h.root.Path(RulesFile))
 	must(t, err)
 	eq(t, string(b), "# bugnet-run harden iptables\n"+v4+"# ipv6\n"+v6)
 
-	// A jump already in OUTPUT is never added twice
+	// A jump already in OUTPUT or FORWARD is never added twice
 	f.fakes.answer = nil
 	eq(t, f.run(t), `{"firewall":"iptables"}`)
 	eq(t, names(f.fakes.take()), []string{
 		"iptables-restore --noflush", "iptables -w -C OUTPUT -j BUGNET",
+		"iptables -w -C FORWARD -j BUGNET",
 		"ip6tables-restore --noflush", "ip6tables -w -C OUTPUT -j BUGNET",
+		"ip6tables -w -C FORWARD -j BUGNET",
+	})
+
+	// A chain kept from a runner without the forward hook gains the FORWARD jump alone
+	f.fakes.answer = func(c call) (string, error) {
+		if len(c.args) > 2 && c.args[1] == "-C" && c.args[2] == "FORWARD" {
+			return "", errors.New("exit status 1")
+		}
+		return "", nil
+	}
+	eq(t, f.run(t), `{"firewall":"iptables"}`)
+	eq(t, names(f.fakes.take()), []string{
+		"iptables-restore --noflush", "iptables -w -C OUTPUT -j BUGNET",
+		"iptables -w -C FORWARD -j BUGNET", "iptables -w -I FORWARD 1 -j BUGNET",
+		"ip6tables-restore --noflush", "ip6tables -w -C OUTPUT -j BUGNET",
+		"ip6tables -w -C FORWARD -j BUGNET", "ip6tables -w -I FORWARD 1 -j BUGNET",
 	})
 }
 
@@ -334,7 +353,8 @@ func TestNftFailureFallsBackToIptables(t *testing.T) {
 	eq(t, f.run(t), `{"firewall":"iptables"}`)
 	eq(t, names(f.fakes.take()), []string{
 		"nft -f FILE", "iptables-restore --noflush", "iptables -w -C OUTPUT -j BUGNET",
-		"ip6tables-restore --noflush", "ip6tables -w -C OUTPUT -j BUGNET",
+		"iptables -w -C FORWARD -j BUGNET", "ip6tables-restore --noflush",
+		"ip6tables -w -C OUTPUT -j BUGNET", "ip6tables -w -C FORWARD -j BUGNET",
 	})
 	b, err := os.ReadFile(f.h.root.Path(RulesFile))
 	must(t, err)
@@ -427,11 +447,12 @@ func TestIptablesLoadsBothChainsOrNeither(t *testing.T) {
 	calls := f.fakes.take()
 	eq(t, names(calls), []string{
 		"iptables-restore --noflush", "iptables -w -C OUTPUT -j BUGNET",
-		"ip6tables-restore --noflush",
+		"iptables -w -C FORWARD -j BUGNET", "ip6tables-restore --noflush",
 		"iptables-restore --noflush", "iptables -w -C OUTPUT -j BUGNET",
+		"iptables -w -C FORWARD -j BUGNET",
 	})
 	eq(t, calls[0].stdin, newV4)
-	eq(t, calls[3].stdin, oldV4)
+	eq(t, calls[4].stdin, oldV4)
 	after, err := os.ReadFile(path)
 	must(t, err)
 	eq(t, string(after), string(kept))
@@ -447,8 +468,8 @@ func TestIptablesLoadsBothChainsOrNeither(t *testing.T) {
 		}
 		eq(t, g.run(t), `{"error":"firewall_unavailable"}`)
 		calls := g.fakes.take()
-		eq(t, names(calls)[3], "iptables-restore --noflush")
-		eq(t, calls[3].stdin, "*filter\n:BUGNET - [0:0]\nCOMMIT\n")
+		eq(t, names(calls)[4], "iptables-restore --noflush")
+		eq(t, calls[4].stdin, "*filter\n:BUGNET - [0:0]\nCOMMIT\n")
 		got, err := os.ReadFile(g.h.root.Path(RulesFile))
 		if earlier == "" {
 			eq(t, errors.Is(err, os.ErrNotExist), true)
@@ -581,7 +602,8 @@ func TestRecheckIptables(t *testing.T) {
 	must(t, err)
 	eq(t, reloaded, false)
 	eq(t, names(f.fakes.take()), []string{
-		"iptables -w -C OUTPUT -j BUGNET", "ip6tables -w -C OUTPUT -j BUGNET",
+		"iptables -w -C OUTPUT -j BUGNET", "iptables -w -C FORWARD -j BUGNET",
+		"ip6tables -w -C OUTPUT -j BUGNET", "ip6tables -w -C FORWARD -j BUGNET",
 	})
 
 	f.fakes.answer = func(c call) (string, error) {
@@ -593,10 +615,30 @@ func TestRecheckIptables(t *testing.T) {
 	reloaded, err = f.h.recheck(t.Context(), time.Now().Add(2*time.Hour))
 	must(t, err)
 	eq(t, reloaded, true)
-	eq(t, names(f.fakes.take())[2:], []string{
+	eq(t, names(f.fakes.take())[3:], []string{
 		"iptables-restore --noflush", "iptables -w -C OUTPUT -j BUGNET",
+		"iptables -w -C FORWARD -j BUGNET",
 		"ip6tables-restore --noflush", "ip6tables -w -C OUTPUT -j BUGNET",
-		"ip6tables -w -I OUTPUT 1 -j BUGNET",
+		"ip6tables -w -I OUTPUT 1 -j BUGNET", "ip6tables -w -C FORWARD -j BUGNET",
+		"ip6tables -w -I FORWARD 1 -j BUGNET",
+	})
+
+	// A FORWARD jump gone alone counts as the table gone
+	f.fakes.answer = func(c call) (string, error) {
+		if c.name == "iptables" && c.args[1] == "-C" && c.args[2] == "FORWARD" {
+			return "", errors.New("exit status 1")
+		}
+		return "", nil
+	}
+	reloaded, err = f.h.recheck(t.Context(), time.Now().Add(3*time.Hour))
+	must(t, err)
+	eq(t, reloaded, true)
+	eq(t, names(f.fakes.take()), []string{
+		"iptables -w -C OUTPUT -j BUGNET", "iptables -w -C FORWARD -j BUGNET",
+		"iptables-restore --noflush", "iptables -w -C OUTPUT -j BUGNET",
+		"iptables -w -C FORWARD -j BUGNET", "iptables -w -I FORWARD 1 -j BUGNET",
+		"ip6tables-restore --noflush", "ip6tables -w -C OUTPUT -j BUGNET",
+		"ip6tables -w -C FORWARD -j BUGNET",
 	})
 }
 
