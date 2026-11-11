@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -11,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/bugnet-sh/bugnet-run/frame"
 	"github.com/bugnet-sh/bugnet-run/internal/gate"
 )
 
@@ -168,6 +171,77 @@ func TestContainerUnitsOutliveAnEmptyTmp(t *testing.T) {
 			eq(t, inContainer(t, id, "readlink /proc/"+again+"/exe"), exe)
 			eq(t, docker(t, nil, "exec", id, exe, "respawn"), `{"started":[]}`)
 		})
+	}
+}
+
+// A Lium pod runs Ubuntu 24.04 with sleep as PID 1, which reaps no orphans
+func TestContainerNoGatePhase(t *testing.T) {
+	needDocker(t)
+	bin := linuxBuild(t)
+	spec, err := json.Marshal(Spec{
+		V: 1, Phase: PhaseNoGate, DenyPorts: []int{29417, 22, 2022}, Sample: true,
+	})
+	must(t, err)
+	id := docker(t, nil, "run", "-d", "--rm", "ubuntu:24.04", "sleep", "infinity")
+	t.Cleanup(func() { _ = exec.Command("docker", "rm", "-f", id).Run() })
+	docker(t, nil, "cp", bin, id+":/usr/local/bin/bugnet-run")
+
+	eq(t, containerSetup(t, id, spec), `{"ca":"skipped","init":"setsid"}`)
+	noGate := "test ! -e /etc/bugnet/gate.json && test ! -e /etc/bugnet/gate.key && " +
+		"test ! -e /run/bugnet/gate.pid"
+	inContainer(t, id, noGate)
+	pid := samplerIn(t, id)
+	eq(t, docker(t, nil, "exec", id, "bugnet-run", "respawn"), `{"started":[]}`)
+
+	// The killed sampler stays a zombie, whose empty command line never passes for a live one
+	inContainer(t, id, "kill -9 "+pid)
+	deadline := time.Now().Add(5 * time.Second)
+	for inContainer(t, id, "awk '/^State:/ {print $2}' /proc/"+pid+"/status") != "Z" {
+		if time.Now().After(deadline) {
+			t.Fatalf("sampler %s never became a zombie", pid)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	out := inContainer(t, id, "bugnet-run start --job nogate -- echo ran")
+	dec := frame.NewDecoder(strings.NewReader(out))
+	var stdout string
+	code := -1
+	for {
+		f, err := dec.Next()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		must(t, err)
+		switch f.Kind {
+		case frame.KindStdout:
+			stdout += string(f.Data)
+		case frame.KindExit:
+			code = f.Code
+		}
+	}
+	eq(t, stdout, "ran\n")
+	eq(t, code, 0)
+	if again := samplerIn(t, id); again == pid {
+		t.Fatalf("start left the zombie sampler %s recorded", pid)
+	}
+	inContainer(t, id, noGate)
+	eq(t, docker(t, nil, "exec", id, "bugnet-run", "respawn"), `{"started":[]}`)
+}
+
+// samplerIn waits for the container's sampler pid file to name a live sampler and returns it
+func samplerIn(t *testing.T, id string) string {
+	t.Helper()
+	deadline := time.Now().Add(20 * time.Second)
+	for {
+		pid := inContainer(t, id, "p=$(cat /run/bugnet/sample.pid 2>/dev/null) && "+
+			"grep -aq sample /proc/$p/cmdline 2>/dev/null && echo $p; true")
+		if pid != "" {
+			return pid
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("no sampler runs")
+		}
+		time.Sleep(100 * time.Millisecond)
 	}
 }
 
