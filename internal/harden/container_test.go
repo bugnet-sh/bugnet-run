@@ -104,15 +104,20 @@ func defaultSpecJSON(t *testing.T) []byte {
 	return b
 }
 
-// peer starts a gate on 29417 in its own container and returns its address on the bridge
-func peer(t *testing.T, image, bin string) string {
+// peer starts a gate on 29417 in its own container and returns it and its address on the bridge
+func peer(t *testing.T, image, bin string) (id, addr string) {
 	t.Helper()
-	id := hardenContainer(t, image, bin)
+	id = hardenContainer(t, image, bin)
 	key := base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{3}, 32))
 	spec := `{"v":1,"gate_key":"` + key + `","gate_listen":":29417","deny_ports":[29417]}`
 	docker(t, []byte(spec), "exec", "-i", id, "sh", "-c",
 		"mkdir -p /tmp/bugnet && cat > /tmp/bugnet/setup-spec.json")
 	inContainer(t, id, "bugnet-run setup --spec /tmp/bugnet/setup-spec.json")
+	return id, address(t, id)
+}
+
+func address(t *testing.T, id string) string {
+	t.Helper()
 	return docker(t, nil, "inspect", "-f",
 		"{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}", id)
 }
@@ -154,7 +159,7 @@ func TestContainerHardenTwiceOneTable(t *testing.T) {
 	for _, image := range containerImages {
 		t.Run(image, func(t *testing.T) {
 			t.Parallel()
-			addr := peer(t, image, bin)
+			_, addr := peer(t, image, bin)
 			id := hardenContainer(t, image, bin, "--cap-add", "NET_ADMIN")
 			if failsInContainer(id, reaches(addr)) {
 				t.Fatalf("the peer at %s is unreachable before harden", addr)
@@ -199,7 +204,7 @@ func TestContainerHardenWithIptables(t *testing.T) {
 	for _, image := range containerImages {
 		t.Run(image, func(t *testing.T) {
 			t.Parallel()
-			addr := peer(t, image, bin)
+			_, addr := peer(t, image, bin)
 			id := hardenContainer(t, image, bin, "--cap-add", "NET_ADMIN")
 			inContainer(t, id, "apt-get update -qq >/dev/null && DEBIAN_FRONTEND=noninteractive "+
 				"apt-get install -y -qq --no-install-recommends iptables >/dev/null")
@@ -274,32 +279,39 @@ func TestContainerHardenForwardsFromANestedNamespace(t *testing.T) {
 	needDocker(t)
 	bin := linuxBuild(t)
 	spec := defaultSpecJSON(t)
+	// nat masquerades nested traffic out of eth0 and publishes nest's 8080 as 18080, like docker -p
 	for _, c := range []struct{ firewall, pkg, nat, list, unhook string }{{
 		firewall: FirewallNft, pkg: "nftables",
 		nat: "nft add table ip nest && nft 'add chain ip nest post " +
 			"{ type nat hook postrouting priority 100; }' && " +
-			"nft 'add rule ip nest post oifname \"eth0\" ip saddr 10.200.0.0/15 masquerade'",
+			"nft 'add rule ip nest post oifname \"eth0\" ip saddr 10.200.0.0/15 masquerade' && " +
+			"nft 'add chain ip nest pre { type nat hook prerouting priority -100; }' && " +
+			"nft 'add rule ip nest pre iifname \"eth0\" tcp dport 18080 dnat to 10.200.0.2:8080'",
 		list:   "nft list table inet bugnet",
 		unhook: "nft flush chain inet bugnet forward && nft delete chain inet bugnet forward",
 	}, {
 		firewall: FirewallIptables, pkg: "iptables",
-		nat:    "iptables -t nat -A POSTROUTING -s 10.200.0.0/15 -o eth0 -j MASQUERADE",
+		nat: "iptables -t nat -A POSTROUTING -s 10.200.0.0/15 -o eth0 -j MASQUERADE && " +
+			"iptables -t nat -A PREROUTING -i eth0 -p tcp --dport 18080 " +
+			"-j DNAT --to-destination 10.200.0.2:8080",
 		list:   "iptables -S && ip6tables -S",
 		unhook: "iptables -D FORWARD -o eth0 -j BUGNET",
 	}} {
 		t.Run(c.firewall, func(t *testing.T) {
 			t.Parallel()
-			addr := peer(t, "ubuntu:24.04", bin)
+			peerID, addr := peer(t, "ubuntu:24.04", bin)
 			id := hardenContainer(t, "ubuntu:24.04", bin, "--privileged")
 			inContainer(t, id, "apt-get update -qq >/dev/null && DEBIAN_FRONTEND=noninteractive "+
 				"apt-get install -y -qq --no-install-recommends iproute2 "+c.pkg+" >/dev/null")
 			nestedNamespace(t, id, c.nat)
+			self := address(t, id)
 			for _, from := range []string{nest, nest2} {
 				if failsInContainer(id, from+reaches(addr)) {
 					t.Fatalf("the peer at %s is unreachable from %q before harden", addr, from)
 				}
 			}
 			reachesInside(t, id)
+			reachesPublished(t, peerID, self)
 
 			// The second load leaves the rules the first one made
 			var once string
@@ -316,6 +328,8 @@ func TestContainerHardenForwardsFromANestedNamespace(t *testing.T) {
 			// Leaving by the uplink meets the blocks, while traffic between nested networks passes
 			refusedFastFrom(t, id, nest, addr)
 			refusedFastFrom(t, id, nest2, addr)
+			// The peer comes in to nest by eth0, and the replies leave by it to a private address
+			reachesPublished(t, peerID, self)
 			reachesInside(t, id)
 			// The resolver docker hands out sits in a private range, and must still answer
 			inContainer(t, id, nest+"getent hosts deb.debian.org")
@@ -328,8 +342,19 @@ func TestContainerHardenForwardsFromANestedNamespace(t *testing.T) {
 			eq(t, inContainer(t, id, "bugnet-run respawn"), `{"started":["firewall"]}`)
 			eq(t, inContainer(t, id, c.list), once)
 			refusedFastFrom(t, id, nest, addr)
+			reachesPublished(t, peerID, self)
 			reachesInside(t, id)
 		})
+	}
+}
+
+// reachesPublished fails unless the peer reaches the listener in nest by the port self publishes
+func reachesPublished(t *testing.T, peerID, self string) {
+	t.Helper()
+	script := "timeout 5 bash -c 'echo > /dev/tcp/" + self + "/18080'"
+	if failsInContainer(peerID, script) {
+		t.Fatalf("the peer never reached the port published on %s, got %q", self,
+			inContainer(t, peerID, script+" 2>&1; echo $?"))
 	}
 }
 
