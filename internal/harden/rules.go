@@ -39,7 +39,7 @@ var resolvConfs = []string{"/etc/resolv.conf", "/run/systemd/resolve/resolv.conf
 type rules struct {
 	resolvers []netip.Addr
 	gateways  []netip.Addr
-	// uplinks carry the default routes, the one way forwarded traffic leaves the sandbox
+	// uplinks are the devices of the default routes when harden runs
 	uplinks   []string
 	allow     []netip.Prefix
 	mailPorts []int
