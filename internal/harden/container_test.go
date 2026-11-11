@@ -8,8 +8,10 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 var containerImages = []string{"debian:12", "ubuntu:22.04", "ubuntu:24.04"}
@@ -131,11 +133,17 @@ func refusedFastFrom(t *testing.T, id, from, peer string) {
 	t.Helper()
 	// The peer is in a private range, 25 is a mail port and 198.51.100.0/24 is the spec's pool
 	for _, dest := range []string{peer + "/29417", "192.0.2.1/25", "198.51.100.7/80"} {
-		got := inContainer(t, id, "out=$("+from+"timeout 1 bash -c 'echo > /dev/tcp/"+dest+
-			"' 2>&1); echo \"$? $out\"")
-		if !strings.HasPrefix(got, "1 ") || !strings.Contains(got, "Connection refused") {
-			t.Fatalf("a connect to %s gave %q, want a refusal within 1 s", dest, got)
-		}
+		refusedWithin1s(t, id, from, dest)
+	}
+}
+
+// refusedWithin1s fails unless a connect to dest, an address and port, is refused within 1 s
+func refusedWithin1s(t *testing.T, id, from, dest string) {
+	t.Helper()
+	got := inContainer(t, id, "out=$("+from+"timeout 1 bash -c 'echo > /dev/tcp/"+dest+
+		"' 2>&1); echo \"$? $out\"")
+	if !strings.HasPrefix(got, "1 ") || !strings.Contains(got, "Connection refused") {
+		t.Fatalf("a connect to %s gave %q, want a refusal within 1 s", dest, got)
 	}
 }
 
@@ -295,6 +303,90 @@ func TestContainerHardenForwardsFromANestedNamespace(t *testing.T) {
 			eq(t, inContainer(t, id, "bugnet-run respawn"), `{"started":["firewall"]}`)
 			eq(t, inContainer(t, id, c.list), once)
 			refusedFastFrom(t, id, nest, addr)
+		})
+	}
+}
+
+// userNetwork makes a bridge network whose containers resolve through docker's 127.0.0.11
+func userNetwork(t *testing.T) (name, gateway string) {
+	t.Helper()
+	name = "bugnet-harden-" + strconv.FormatInt(time.Now().UnixNano(), 36)
+	docker(t, nil, "network", "create", name)
+	t.Cleanup(func() {
+		// docker removes a killed container, and with it the network's endpoint, a moment later
+		for range 20 {
+			if exec.Command("docker", "network", "rm", name).Run() == nil {
+				return
+			}
+			time.Sleep(500 * time.Millisecond)
+		}
+	})
+	gateway = docker(t, nil, "network", "inspect", "-f",
+		"{{range .IPAM.Config}}{{.Gateway}}{{end}}", name)
+	return name, gateway
+}
+
+// hostListener accepts and closes connections to addr:port in the docker host's namespace
+func hostListener(t *testing.T, addr string, port int) {
+	t.Helper()
+	// No capability, so the host's own firewall stays out of reach
+	id := docker(t, nil, "run", "-d", "--rm", "--network", "host", "--cap-drop", "ALL",
+		"ubuntu:24.04", "perl", "-MIO::Socket::INET", "-e", "$| = 1; "+
+			"my $s = IO::Socket::INET->new(LocalAddr => $ARGV[0], LocalPort => $ARGV[1], "+
+			"Listen => 16, ReuseAddr => 1) or die qq(listen: $!\\n); print qq(ready\\n); "+
+			"while (my $c = $s->accept) { close $c }", addr, strconv.Itoa(port))
+	t.Cleanup(func() { _ = exec.Command("docker", "kill", id).Run() })
+	for range 50 {
+		if docker(t, nil, "logs", id) == "ready" {
+			return
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	t.Fatalf("nothing listens on %s:%d", addr, port)
+}
+
+// On Lium the gateway is the host, whose executor listens on 8080
+func TestContainerHardenNoGateway(t *testing.T) {
+	needDocker(t)
+	bin := linuxBuild(t)
+	network, gateway := userNetwork(t)
+	hostListener(t, gateway, 8080)
+	executor := gateway + "/8080"
+	for _, c := range []struct {
+		firewall, pkg string
+		noGateway     bool
+	}{
+		{FirewallNft, "nftables", false}, {FirewallNft, "nftables", true},
+		{FirewallIptables, "iptables", false}, {FirewallIptables, "iptables", true},
+	} {
+		t.Run(c.firewall+"/no_gateway="+strconv.FormatBool(c.noGateway), func(t *testing.T) {
+			t.Parallel()
+			id := hardenContainer(t, "ubuntu:24.04", bin, "--network", network, "--cap-add",
+				"NET_ADMIN")
+			// Installing the tool first keeps harden's own 60 s install out of this test
+			inContainer(t, id, "apt-get update -qq >/dev/null && DEBIAN_FRONTEND=noninteractive "+
+				"apt-get install -y -qq --no-install-recommends "+c.pkg+" >/dev/null")
+			eq(t, inContainer(t, id, "sed -n 's/^nameserver //p' /etc/resolv.conf"), "127.0.0.11")
+			reach := "timeout 5 bash -c 'echo > /dev/tcp/" + executor + "'"
+			if failsInContainer(id, reach) {
+				t.Fatalf("the gateway's port at %s is unreachable before harden", executor)
+			}
+
+			b, err := json.Marshal(Spec{
+				V: 1, MailPorts: []int{25, 465, 587}, DenyRanges: defaultDeny,
+				Pools: []string{"198.51.100.0/24"}, NoGateway: c.noGateway,
+			})
+			must(t, err)
+			out, code := containerHarden(t, id, b)
+			eq(t, out, `{"firewall":"`+c.firewall+`"}`)
+			eq(t, code, 0)
+			if c.noGateway {
+				refusedWithin1s(t, id, "", executor)
+			} else if failsInContainer(id, reach) {
+				t.Fatalf("the gateway's port at %s is unreachable after harden", executor)
+			}
+			// Docker's resolver forwards from the host's namespace, past the sandbox's rules
+			inContainer(t, id, "getent hosts deb.debian.org")
 		})
 	}
 }
