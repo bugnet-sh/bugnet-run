@@ -40,12 +40,17 @@ type Spec struct {
 	Sample bool `json:"sample"`
 	// Seed is 32 base64 bytes of router randomness, mixed into the kernel before any other step
 	Seed string `json:"seed"`
-	// Phase is "pool" for a member that only gets the CA and the env lines, else every step
+	// Phase is "pool" for a member's CA and env lines, "nogate" for all but the gate, else all
 	Phase string `json:"phase"`
 }
 
-// PhasePool is Spec.Phase for a pool member, which gets no gate and no gate key
-const PhasePool = "pool"
+// Values of Spec.Phase besides the empty full phase
+const (
+	// PhasePool is a pool member, which gets no gate and no gate key yet
+	PhasePool = "pool"
+	// PhaseNoGate is a sandbox that never has a gate, as on a provider with its own sshd
+	PhaseNoGate = "nogate"
+)
 
 // Result is the one JSON line setup prints
 type Result struct {
@@ -148,6 +153,9 @@ func run(ctx context.Context, args []string, stderr io.Writer) (Result, error) {
 		if err != nil {
 			return Result{}, fail(ErrBadSpec, err)
 		}
+		if *repair && s.Phase == PhaseNoGate {
+			return Result{}, fail(ErrBadSpec, errors.New("a nogate spec has no gate to repair"))
+		}
 		spec = &s
 		// Nothing else runs before the kernel has the router's bytes
 		res.Reseed = reseed(s.Seed)
@@ -170,9 +178,14 @@ func run(ctx context.Context, args []string, stderr io.Writer) (Result, error) {
 	if spec != nil && spec.Phase == PhasePool {
 		return poolPhase(ctx, root, *spec, res)
 	}
-	cfg, key, changed, err := gateFiles(root, spec)
-	if err != nil {
-		return Result{}, err
+	noGate := spec != nil && spec.Phase == PhaseNoGate
+	var cfg gate.Config
+	var key string
+	var changed bool
+	if !noGate {
+		if cfg, key, changed, err = gateFiles(root, spec); err != nil {
+			return Result{}, err
+		}
 	}
 	if !*repair {
 		if res.CA, err = installCA(ctx, root, *spec); err != nil {
@@ -191,8 +204,11 @@ func run(ctx context.Context, args []string, stderr io.Writer) (Result, error) {
 		return Result{}, fail(ErrGateFailed, err)
 	}
 	sup := sandbox.Supervisor{Root: root, Systemctl: systemctl}
-	if err := startGate(ctx, sup, cfg, key, changed); err != nil {
-		return Result{}, fail(ErrGateFailed, err)
+	if !noGate {
+		if err := startGate(ctx, sup, cfg, key, changed); err != nil {
+			return Result{}, fail(ErrGateFailed, err)
+		}
+		res.Gate = "listening"
 	}
 	// The sampler only feeds the estimator, so a sandbox without one is still ready
 	if !*repair && spec.Sample {
@@ -200,7 +216,7 @@ func run(ctx context.Context, args []string, stderr io.Writer) (Result, error) {
 			_, _ = fmt.Fprintf(stderr, "bugnet-run setup: sampler: %v\n", err)
 		}
 	}
-	res.Gate, res.Init = "listening", string(sup.Init())
+	res.Init = string(sup.Init())
 	return res, nil
 }
 
@@ -253,21 +269,27 @@ func (s Spec) validate() error {
 	if s.V != 1 {
 		return fmt.Errorf("spec version %d", s.V)
 	}
-	if s.Phase != "" && s.Phase != PhasePool {
-		return errors.New("phase is neither empty nor pool")
+	switch s.Phase {
+	case "", PhasePool, PhaseNoGate:
+	default:
+		return errors.New("phase is not empty, pool or nogate")
+	}
+	if s.Phase == PhaseNoGate && (s.GateKey != "" || s.GateListen != "") {
+		return errors.New("a nogate spec carries a gate_key or a gate_listen")
 	}
 	if s.Seed != "" {
 		if b, err := base64.StdEncoding.DecodeString(s.Seed); err != nil || len(b) != seedLen {
 			return errors.New("seed is not 32 base64 bytes")
 		}
 	}
-	// A pool member has no gate yet, so its spec may leave both out
-	if s.Phase != PhasePool || s.GateKey != "" {
+	// Only the full phase starts a gate, so the others may leave both out
+	full := s.Phase == ""
+	if full || s.GateKey != "" {
 		if !gate.ValidKey(s.GateKey) {
 			return errors.New("gate_key is not 43 base64url characters")
 		}
 	}
-	if s.Phase != PhasePool || s.GateListen != "" {
+	if full || s.GateListen != "" {
 		if _, err := gate.ListenPort(s.GateListen); err != nil {
 			return err
 		}

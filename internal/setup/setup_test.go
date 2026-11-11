@@ -726,3 +726,111 @@ func TestSetupReloadsTheFirewallRules(t *testing.T) {
 	eq(t, code, 0)
 	eq(t, roots, []string{f.root.Dir()})
 }
+
+/* The nogate phase */
+
+// noGateSpec is the spec of a provider with its own sshd and no previews
+func noGateSpec() Spec {
+	return Spec{V: 1, Phase: PhaseNoGate, DenyPorts: []int{29417, 22, 2022, 49983}}
+}
+
+func TestSetupNoGatePhaseRunsEveryStepButTheGate(t *testing.T) {
+	f := freshFixture(t)
+	_, args := stubRandom(t, func([]byte) error { return nil })
+	var rechecked []string
+	old := recheckFirewall
+	recheckFirewall = func(_ context.Context, r sandbox.Root, _ time.Time) (bool, error) {
+		rechecked = append(rechecked, r.Dir())
+		return false, nil
+	}
+	t.Cleanup(func() { recheckFirewall = old })
+	baked := testCA(t, "baked")
+	writeFile(t, f.root.Path(sandbox.CADir+"/bugnet-egress-v1.crt"), baked)
+	s := noGateSpec()
+	s.Seed, s.CASHA256, s.CAVersion, s.PreviewDomain = seed32(4), sha(baked), 1, "preview.example"
+
+	out, code := f.run(t, s)
+	eq(t, out, `{"ca":"checked","init":"setsid","reseed":"ioctl"}`)
+	eq(t, code, 0)
+	eq(t, len(*args), 1)
+	env := readFile(t, f.root.Path(sandbox.EnvFile))
+	eq(t, strings.Contains(env,
+		"NODE_EXTRA_CA_CERTS=/usr/local/share/ca-certificates/bugnet-egress-v1.crt\n"), true)
+	eq(t, strings.Contains(env, "__VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS=.preview.example\n"), true)
+	eq(t, exists(f.root.Path(sandbox.ProfileFile)), true)
+	eq(t, rechecked, []string{f.root.Dir()})
+	eq(t, sameContent(t, f.root.Path(sandbox.RunnerPath), binPath), true)
+	for _, path := range []string{
+		sandbox.GateKeyFile, sandbox.GateConfig, sandbox.PidFile("gate"), sandbox.SampleConfig,
+	} {
+		if exists(f.root.Path(path)) {
+			t.Errorf("the nogate phase left %s", path)
+		}
+	}
+}
+
+func TestSetupNoGatePhaseStartsTheSampler(t *testing.T) {
+	f := newFixture(t)
+	s := noGateSpec()
+	s.Sample = true
+	out, code := f.run(t, s)
+	eq(t, out, `{"ca":"skipped","init":"setsid"}`)
+	eq(t, code, 0)
+	eq(t, readFile(t, f.root.Path(sandbox.SampleConfig)), "{\"v\":1}\n")
+	pid := f.samplerPid(t)
+	files := snapshot(t, f.root)
+
+	out, code = f.run(t, s)
+	eq(t, out, `{"ca":"skipped","init":"setsid"}`)
+	eq(t, code, 0)
+	eq(t, f.samplerPid(t), pid)
+	eq(t, snapshot(t, f.root), files)
+	eq(t, exists(f.root.Path(sandbox.PidFile("gate"))), false)
+}
+
+func TestSetupNoGatePhaseUnderSystemdInstallsNoGateUnit(t *testing.T) {
+	f := newFixture(t)
+	must(t, os.MkdirAll(f.root.Path(sandbox.SystemdDir), 0o755))
+	fake := fakeSystemctl(t, f)
+	s := noGateSpec()
+	s.Sample = true
+	out, code := f.run(t, s)
+	eq(t, out, `{"ca":"skipped","init":"systemd"}`)
+	eq(t, code, 0)
+	eq(t, fake.take(), []string{
+		"daemon-reload", "enable --quiet bugnet-sample.service",
+		"reset-failed bugnet-sample.service", "start bugnet-sample.service",
+	})
+	eq(t, exists(f.root.Path(sandbox.UnitDir+"/bugnet-gate.service")), false)
+	f.samplerPid(t)
+}
+
+func TestSetupNoGatePhaseRefusesGateFields(t *testing.T) {
+	f := newFixture(t)
+	listen := f.spec().GateListen
+	for name, change := range map[string]func(*Spec){
+		"gate key":    func(s *Spec) { s.GateKey = testKey },
+		"gate listen": func(s *Spec) { s.GateListen = listen },
+		"both":        func(s *Spec) { s.GateKey, s.GateListen = testKey, listen },
+	} {
+		s := noGateSpec()
+		change(&s)
+		out, code := f.run(t, s)
+		if out != `{"error":"bad_spec"}` || code != 1 {
+			t.Errorf("%s: printed %s and exited %d", name, out, code)
+		}
+	}
+	// A repair only touches the gate, which this phase never has
+	out, code := f.run(t, noGateSpec(), "--repair")
+	eq(t, out, `{"error":"bad_spec"}`)
+	eq(t, code, 1)
+	eq(t, exists(f.root.Path(sandbox.GateKeyFile)), false)
+	eq(t, exists(f.root.Path(sandbox.EnvFile)), false)
+
+	_, code = f.run(t, noGateSpec())
+	eq(t, code, 0)
+	out, code = f.run(t, nil, "--repair")
+	eq(t, out, `{"error":"bad_spec"}`)
+	eq(t, code, 1)
+	eq(t, exists(f.root.Path(sandbox.PidFile("gate"))), false)
+}
