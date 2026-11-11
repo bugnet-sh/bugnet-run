@@ -176,6 +176,9 @@ func appendAddr(out []netip.Addr, a netip.Addr) []netip.Addr {
 
 /* nftables */
 
+// hooks are filtered alike, forward carrying what Docker or a nested namespace sends
+var hooks = []string{"output", "forward"}
+
 // nft replaces the whole table in one transaction, so a second load leaves one table
 func (r rules) nft() string {
 	var b strings.Builder
@@ -183,11 +186,16 @@ func (r rules) nft() string {
 	b.WriteString("table inet bugnet\ndelete table inet bugnet\ntable inet bugnet {\n")
 	writeSet(&b, "pools4", "ipv4_addr", r.pools4)
 	writeSet(&b, "pools6", "ipv6_addr", r.pools6)
-	b.WriteString("\tchain output {\n\t\ttype filter hook output priority 0; policy accept;\n")
-	for _, rule := range r.nftRules() {
-		b.WriteString("\t\t" + rule + "\n")
+	rules := r.nftRules()
+	for _, hook := range hooks {
+		fmt.Fprintf(&b, "\tchain %s {\n\t\ttype filter hook %s priority 0; policy accept;\n",
+			hook, hook)
+		for _, rule := range rules {
+			b.WriteString("\t\t" + rule + "\n")
+		}
+		b.WriteString("\t}\n")
 	}
-	b.WriteString("\t}\n}\n")
+	b.WriteString("}\n")
 	return b.String()
 }
 

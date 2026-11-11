@@ -24,8 +24,11 @@ func TestRulesetAllowsBeforeBlocks(t *testing.T) {
 			s.Pools = []string{"198.51.100.0/24", "2001:db8:bad::/48"}
 		}),
 	}
-	rs := buildNft(t, spec(), more...)
-	eq(t, lastIndex(t, rs, "accept") < firstIndex(t, rs, "reject"), true)
+	chains := strings.Split(buildNft(t, spec(), more...), "\tchain ")[1:]
+	eq(t, len(chains), 2)
+	for _, rs := range chains {
+		eq(t, lastIndex(t, rs, "accept") < firstIndex(t, rs, "reject"), true)
+	}
 	v4, v6 := buildIptables(t, spec(), more...)
 	for _, rs := range []string{v4, v6} {
 		eq(t, lastIndex(t, rs, "-j ACCEPT") < firstIndex(t, rs, "-j REJECT"), true)
@@ -157,6 +160,34 @@ func TestEveryBlockOfTheSpec(t *testing.T) {
 	eq(t, strings.Contains(rs, "daddr 10.0.0.0/8"), false)
 	eq(t, strings.Contains(rs, "@pools"), false)
 	index(t, rs, "tcp dport { 25, 465, 587 } reject with tcp reset")
+}
+
+// Docker or a nested namespace in the sandbox sends through forward, which output never sees
+func TestForwardChainCarriesTheOutputRules(t *testing.T) {
+	t.Parallel()
+	for name, opts := range map[string][]option{
+		"defaults": spec(),
+		"e2b":      spec(withSpec(func(s *Spec) { s.DenyRanges, s.Pools = nil, nil })),
+		"addresses": spec(resolvConf("nameserver 10.0.0.2\n"), procFile("net/route", routeTable),
+			withSpec(func(s *Spec) {
+				s.Allow = []string{"10.9.0.0/16"}
+				s.Pools = []string{"198.51.100.0/24", "2001:db8:bad::/48"}
+			})),
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			r := ruleset(t, opts)
+			rs := r.nft()
+			body := "\t\t" + strings.Join(r.nftRules(), "\n\t\t") + "\n\t}\n"
+			output := index(t, rs, "\tchain output {\n"+
+				"\t\ttype filter hook output priority 0; policy accept;\n"+body)
+			forward := index(t, rs, "\tchain forward {\n"+
+				"\t\ttype filter hook forward priority 0; policy accept;\n"+body)
+			eq(t, output < forward, true)
+			eq(t, strings.Count(rs, "\tchain "), 2)
+			eq(t, strings.HasSuffix(rs, "\t}\n}\n"), true)
+		})
+	}
 }
 
 func TestPoolsCapped(t *testing.T) {
