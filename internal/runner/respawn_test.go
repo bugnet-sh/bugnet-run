@@ -701,3 +701,51 @@ func TestRespawnStartsDeadSampler(t *testing.T) {
 		t.Fatalf("the dead sampler's pid %d is still recorded", pid)
 	}
 }
+
+func TestStartWithoutGateConfigStartsNoGate(t *testing.T) {
+	t.Parallel()
+	s := newRoot(t, "gate", "sample")
+	root := s.root
+	// The sampler writes into the job directory's parent, which it never makes itself
+	if err := os.MkdirAll(root.Path("/tmp/bugnet"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	spec, err := json.Marshal(map[string]any{
+		"v": 1, "phase": "nogate", "gate_key": "", "gate_listen": "",
+		"deny_ports": []int{29417, 22}, "sample": true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	specPath := filepath.Join(t.TempDir(), "setup-spec.json")
+	if err := os.WriteFile(specPath, spec, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	eq(t, strings.TrimSpace(string(runRaw(t, "setup", "--spec", specPath, "--root", root.Dir()))),
+		`{"ca":"skipped","init":"setsid"}`)
+	var pid int
+	waitFor(t, 5*time.Second, func() bool {
+		pid, err = sandbox.ReadPidFile(root, "sample")
+		return err == nil && !gone(pid)
+	})
+	eq(t, strings.TrimSpace(string(runRaw(t, "respawn", "--root", root.Dir()))),
+		`{"started":[]}`)
+
+	s.end(t, pid, syscall.SIGKILL)
+	res := startJob(t, t.TempDir(), "job", nil, "--root", root.Dir(), "--", "echo", "ran").
+		collect(t, 0, 0)
+	if x := res.mustExit(t); x.Code != 0 || string(res.stdout) != "ran\n" {
+		t.Fatalf("exit %+v stdout %q, want 0 and %q", x, res.stdout, "ran\n")
+	}
+	waitFor(t, 5*time.Second, func() bool {
+		again, err := sandbox.ReadPidFile(root, "sample")
+		return err == nil && again != pid && !gone(again)
+	})
+	for _, path := range []string{sandbox.GateConfig, sandbox.PidFile("gate")} {
+		if exists(root.Path(path)) {
+			t.Errorf("a start without gate config left %s", path)
+		}
+	}
+	eq(t, strings.TrimSpace(string(runRaw(t, "respawn", "--root", root.Dir()))),
+		`{"started":[]}`)
+}
