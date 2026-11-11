@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -400,6 +401,7 @@ func TestHardenLoadsNftAndKeepsTheRuleset(t *testing.T) {
 	eq(t, string(b2), string(b))
 }
 
+// With no uplink found, FORWARD jumps for every packet
 func TestHardenFallsBackToIptables(t *testing.T) {
 	t.Parallel()
 	f := newFixture(t, procFile("net/if_inet6", "x"))
@@ -454,6 +456,105 @@ func TestHardenFallsBackToIptables(t *testing.T) {
 		"ip6tables-restore --noflush", "ip6tables -w -C OUTPUT -j BUGNET",
 		"ip6tables -w -C FORWARD -j BUGNET", "ip6tables -w -I FORWARD 1 -j BUGNET",
 	})
+}
+
+// Forwarded traffic that leaves by no uplink stays inside the sandbox and skips BUGNET
+func TestIptablesForwardJumpsByEachUplink(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t, procFile("net/if_inet6", "x"), procFile("net/route", routeTable),
+		procFile("net/ipv6_route", wg0RouteTable))
+	f.fakes = newFakeTools("iptables")
+	f.h.tools = f.fakes.tools()
+	missing := func(rule string) func(c call) (string, error) {
+		return func(c call) (string, error) {
+			if rule == "all" && len(c.args) > 1 && c.args[1] == "-C" || c.String() == rule {
+				return "", errors.New("exit status 1")
+			}
+			return "", nil
+		}
+	}
+	f.fakes.answer = missing("all")
+	eq(t, f.run(t), `{"firewall":"iptables"}`)
+	calls := f.fakes.take()
+	var want []string
+	for _, tool := range []string{"iptables", "ip6tables"} {
+		want = append(want, tool+"-restore --noflush",
+			tool+" -w -C OUTPUT -j BUGNET", tool+" -w -I OUTPUT 1 -j BUGNET",
+			tool+" -w -C FORWARD -o eth0 -j BUGNET", tool+" -w -I FORWARD 1 -o eth0 -j BUGNET",
+			tool+" -w -C FORWARD -o wg0 -j BUGNET", tool+" -w -I FORWARD 1 -o wg0 -j BUGNET")
+	}
+	eq(t, names(calls), want)
+	v4, v6 := f.h.rules(f.spec).iptables()
+	b, err := os.ReadFile(f.h.root.Path(RulesFile))
+	must(t, err)
+	eq(t, string(b), "# bugnet-run harden iptables\n# uplinks eth0 wg0\n"+v4+"# ipv6\n"+v6)
+
+	// Each jump goes in once
+	f.fakes.answer = nil
+	eq(t, f.run(t), `{"firewall":"iptables"}`)
+	checks := []string{
+		"iptables -w -C OUTPUT -j BUGNET", "iptables -w -C FORWARD -o eth0 -j BUGNET",
+		"iptables -w -C FORWARD -o wg0 -j BUGNET", "ip6tables -w -C OUTPUT -j BUGNET",
+		"ip6tables -w -C FORWARD -o eth0 -j BUGNET", "ip6tables -w -C FORWARD -o wg0 -j BUGNET",
+	}
+	eq(t, names(f.fakes.take()), slices.Concat([]string{"iptables-restore --noflush"},
+		checks[:3], []string{"ip6tables-restore --noflush"}, checks[3:]))
+
+	// The recheck checks the uplinks the kept ruleset names, whatever the routes say now
+	writeFile(t, filepath.Join(f.h.procDir, "net", "route"), "")
+	writeFile(t, filepath.Join(f.h.procDir, "net", "ipv6_route"), "")
+	reloaded, err := f.h.recheck(t.Context(), time.Now())
+	must(t, err)
+	eq(t, reloaded, false)
+	eq(t, names(f.fakes.take()), checks)
+
+	// A jump gone alone counts as the table gone, and comes back alone
+	f.fakes.answer = missing("iptables -w -C FORWARD -o wg0 -j BUGNET")
+	reloaded, err = f.h.recheck(t.Context(), time.Now())
+	must(t, err)
+	eq(t, reloaded, true)
+	eq(t, names(f.fakes.take()), slices.Concat(checks[:3], []string{"iptables-restore --noflush"},
+		checks[:3], []string{"iptables -w -I FORWARD 1 -o wg0 -j BUGNET",
+			"ip6tables-restore --noflush"}, checks[3:]))
+	after, err := os.ReadFile(f.h.root.Path(RulesFile))
+	must(t, err)
+	eq(t, string(after), string(b))
+
+	// A ruleset kept by a runner that named no uplinks filters every forwarded packet
+	writeFile(t, f.h.root.Path(RulesFile), "# bugnet-run harden iptables\n"+v4+"# ipv6\n"+v6)
+	f.fakes.answer = nil
+	reloaded, err = f.h.recheck(t.Context(), time.Now())
+	must(t, err)
+	eq(t, reloaded, false)
+	eq(t, names(f.fakes.take()), []string{
+		"iptables -w -C OUTPUT -j BUGNET", "iptables -w -C FORWARD -j BUGNET",
+		"ip6tables -w -C OUTPUT -j BUGNET", "ip6tables -w -C FORWARD -j BUGNET",
+	})
+
+	// An uplink name that is no interface name makes the kept ruleset unreadable
+	writeFile(t, f.h.root.Path(RulesFile), "# bugnet-run harden iptables\n# uplinks -j\n"+v4+
+		"# ipv6\n"+v6)
+	_, err = f.h.recheck(t.Context(), time.Now())
+	eq(t, err != nil, true)
+	eq(t, f.fakes.take(), []call(nil))
+}
+
+func TestIptablesForwardJumpsByOneUplink(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t, procFile("net/route", routeTable))
+	f.fakes = newFakeTools("iptables")
+	f.h.tools = f.fakes.tools()
+	eq(t, f.run(t), `{"firewall":"iptables"}`)
+	eq(t, names(f.fakes.take()), []string{
+		"iptables-restore --noflush", "iptables -w -C OUTPUT -j BUGNET",
+		"iptables -w -C FORWARD -o eth0 -j BUGNET",
+		"ip6tables-restore --noflush", "ip6tables -w -C OUTPUT -j BUGNET",
+		"ip6tables -w -C FORWARD -o eth0 -j BUGNET",
+	})
+	b, err := os.ReadFile(f.h.root.Path(RulesFile))
+	must(t, err)
+	eq(t, strings.HasPrefix(string(b), "# bugnet-run harden iptables\n# uplinks eth0\n*filter\n"),
+		true)
 }
 
 func TestNftFailureFallsBackToIptables(t *testing.T) {

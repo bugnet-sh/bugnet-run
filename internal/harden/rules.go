@@ -15,10 +15,11 @@ import (
 	"strings"
 )
 
-// Headers of the kept ruleset, which name the tool that loads it
+// Lines of the kept ruleset, whose header names the tool that loads it
 const (
 	nftHeader      = "# bugnet-run harden nft\n"
 	iptablesHeader = "# bugnet-run harden iptables\n"
+	uplinksMarker  = "# uplinks "
 	ipv6Marker     = "# ipv6\n"
 )
 

@@ -55,8 +55,12 @@ func (h hardener) load(ctx context.Context, rs rules) (string, error) {
 	}
 	if _, ok := h.tools.look("iptables-restore"); ok {
 		v4, v6 := rs.iptables()
-		err := h.keep(iptablesHeader+v4+ipv6Marker+v6, func(string) error {
-			return h.loadIptables(ctx, v4, v6)
+		names := ""
+		if len(rs.uplinks) > 0 {
+			names = uplinksMarker + strings.Join(rs.uplinks, " ") + "\n"
+		}
+		err := h.keep(iptablesHeader+names+v4+ipv6Marker+v6, func(string) error {
+			return h.loadIptables(ctx, v4, v6, rs.uplinks)
 		})
 		if err == nil {
 			return FirewallIptables, nil
@@ -101,30 +105,43 @@ func (h hardener) loadNft(ctx context.Context, nft, path string) error {
 }
 
 // loadIptables loads both chains or neither, leaving IPv6 out only where the kernel has none
-func (h hardener) loadIptables(ctx context.Context, v4, v6 string) error {
-	if err := h.restore(ctx, "iptables", v4); err != nil {
+func (h hardener) loadIptables(ctx context.Context, v4, v6 string, uplinks []string) error {
+	if err := h.restore(ctx, "iptables", v4, uplinks); err != nil {
 		return err
 	}
-	err := h.restore(ctx, "ip6tables", v6)
+	err := h.restore(ctx, "ip6tables", v6, uplinks)
 	if err == nil || !h.ipv6() {
 		return nil
 	}
-	return errors.Join(err, h.restore(ctx, "iptables", h.keptV4()))
+	k := h.keptIptables()
+	return errors.Join(err, h.restore(ctx, "iptables", k.v4, k.uplinks))
 }
 
-// keptV4 is the IPv4 chain the kept ruleset holds, or an empty chain when it holds none
-func (h hardener) keptV4() string {
+// keptIptables is the iptables ruleset kept, or an empty chain when none is kept
+func (h hardener) keptIptables() kept {
 	b, err := os.ReadFile(h.root.Path(RulesFile))
 	if err == nil {
 		if k, err := parseKept(b); err == nil && k.firewall == FirewallIptables {
-			return k.v4
+			return k
 		}
 	}
-	return emptyChain
+	return kept{firewall: FirewallIptables, v4: emptyChain}
 }
 
-// restore refills the BUGNET chain and makes the chain of each hook jump to it once
-func (h hardener) restore(ctx context.Context, tool, text string) error {
+// jumpRules send OUTPUT to BUGNET, and FORWARD only by an uplink unless none was found
+func jumpRules(uplinks []string) [][]string {
+	if len(uplinks) == 0 {
+		return [][]string{{"OUTPUT"}, {"FORWARD"}}
+	}
+	out := [][]string{{"OUTPUT"}}
+	for _, u := range uplinks {
+		out = append(out, []string{"FORWARD", "-o", u})
+	}
+	return out
+}
+
+// restore refills the BUGNET chain and adds each jump to it once
+func (h hardener) restore(ctx context.Context, tool, text string, uplinks []string) error {
 	restore, ok := h.tools.look(tool + "-restore")
 	if !ok {
 		return fmt.Errorf("%s-restore is not installed", tool)
@@ -132,39 +149,40 @@ func (h hardener) restore(ctx context.Context, tool, text string) error {
 	if _, err := h.tools.run(ctx, []byte(text), restore, "--noflush"); err != nil {
 		return err
 	}
-	for _, hook := range hooks {
-		chain := strings.ToUpper(hook)
-		if h.jumps(ctx, tool, chain) {
+	for _, rule := range jumpRules(uplinks) {
+		if h.jumps(ctx, tool, rule) {
 			continue
 		}
 		path, ok := h.tools.look(tool)
 		if !ok {
 			return fmt.Errorf("%s is not installed", tool)
 		}
-		_, err := h.tools.run(ctx, nil, path, "-w", "-I", chain, "1", "-j", "BUGNET")
-		if err != nil {
+		args := slices.Concat([]string{"-w", "-I", rule[0], "1"}, rule[1:],
+			[]string{"-j", "BUGNET"})
+		if _, err := h.tools.run(ctx, nil, path, args...); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-// hooked reports whether the chain of every hook jumps to BUGNET
-func (h hardener) hooked(ctx context.Context, tool string) bool {
-	for _, hook := range hooks {
-		if !h.jumps(ctx, tool, strings.ToUpper(hook)) {
+// hooked reports whether every jump to BUGNET is in place
+func (h hardener) hooked(ctx context.Context, tool string, uplinks []string) bool {
+	for _, rule := range jumpRules(uplinks) {
+		if !h.jumps(ctx, tool, rule) {
 			return false
 		}
 	}
 	return true
 }
 
-func (h hardener) jumps(ctx context.Context, tool, chain string) bool {
+func (h hardener) jumps(ctx context.Context, tool string, rule []string) bool {
 	path, ok := h.tools.look(tool)
 	if !ok {
 		return false
 	}
-	_, err := h.tools.run(ctx, nil, path, "-w", "-C", chain, "-j", "BUGNET")
+	_, err := h.tools.run(ctx, nil, path, slices.Concat([]string{"-w", "-C"}, rule,
+		[]string{"-j", "BUGNET"})...)
 	return err == nil
 }
 
@@ -178,6 +196,7 @@ func (h hardener) ipv6() bool {
 type kept struct {
 	firewall string
 	v4, v6   string
+	uplinks  []string
 	// chains are checked in place of a fixed list, so a ruleset kept without forward stays whole
 	chains []string
 }
@@ -189,9 +208,20 @@ func parseKept(b []byte) (kept, error) {
 		return kept{firewall: FirewallNft, chains: chains}, nil
 	}
 	if rest, ok := strings.CutPrefix(text, iptablesHeader); ok {
+		var uplinks []string
+		if line, ok := strings.CutPrefix(rest, uplinksMarker); ok {
+			var names string
+			names, rest, _ = strings.Cut(line, "\n")
+			uplinks = strings.Fields(names)
+			for _, u := range uplinks {
+				if !ifname.MatchString(u) {
+					return kept{}, errors.New("the kept ruleset names a bad uplink")
+				}
+			}
+		}
 		v4, v6, ok := strings.Cut(rest, ipv6Marker)
 		if ok {
-			return kept{firewall: FirewallIptables, v4: v4, v6: v6}, nil
+			return kept{firewall: FirewallIptables, v4: v4, v6: v6, uplinks: uplinks}, nil
 		}
 	}
 	return kept{}, errors.New("the kept ruleset names no firewall")
@@ -200,7 +230,8 @@ func parseKept(b []byte) (kept, error) {
 // present reports whether the table the kept ruleset makes is still loaded with every chain
 func (h hardener) present(ctx context.Context, k kept) bool {
 	if k.firewall == FirewallIptables {
-		return h.hooked(ctx, "iptables") && (!h.ipv6() || h.hooked(ctx, "ip6tables"))
+		return h.hooked(ctx, "iptables", k.uplinks) &&
+			(!h.ipv6() || h.hooked(ctx, "ip6tables", k.uplinks))
 	}
 	nft, ok := h.tools.look("nft")
 	if !ok {
@@ -241,7 +272,7 @@ func bugnetChains(text string) ([]string, bool) {
 
 func (h hardener) loadKept(ctx context.Context, k kept, path string) error {
 	if k.firewall == FirewallIptables {
-		return h.loadIptables(ctx, k.v4, k.v6)
+		return h.loadIptables(ctx, k.v4, k.v6, k.uplinks)
 	}
 	nft, ok := h.tools.look("nft")
 	if !ok {
