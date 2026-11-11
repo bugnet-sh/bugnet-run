@@ -624,7 +624,8 @@ func TestStartReloadsAMissingFirewallOnceAMinute(t *testing.T) {
 	env := []string{path}
 	startJob(t, t.TempDir(), "first", env, "--root", root.Dir(), "--", "true").collect(t, 0, 0).
 		mustExit(t)
-	sameAs(t, calls(), []string{"list tables", "-f " + root.Path("/etc/bugnet/firewall.rules")})
+	rules := root.Path("/etc/bugnet/firewall.rules")
+	sameAs(t, calls(), []string{"list chains inet", "-f " + rules})
 
 	startJob(t, t.TempDir(), "second", env, "--root", root.Dir(), "--", "true").collect(t, 0, 0).
 		mustExit(t)

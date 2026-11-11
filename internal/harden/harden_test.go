@@ -393,7 +393,7 @@ func TestRefusedLoadKeepsTheEarlierRuleset(t *testing.T) {
 	// The kept ruleset still brings a lost table back
 	f.fakes.answer = func(c call) (string, error) {
 		if c.args[0] == "list" {
-			return "table ip filter\n", nil
+			return "table inet filter {\n\tchain input {\n\t}\n}\n", nil
 		}
 		return "", nil
 	}
@@ -401,7 +401,7 @@ func TestRefusedLoadKeepsTheEarlierRuleset(t *testing.T) {
 	must(t, err)
 	eq(t, reloaded, true)
 	calls = f.fakes.take()
-	eq(t, names(calls), []string{"nft list tables", "nft -f FILE"})
+	eq(t, names(calls), []string{"nft list chains inet", "nft -f FILE"})
 	eq(t, calls[1].stdin, string(before))
 }
 
@@ -560,34 +560,75 @@ func TestRecheckReloadsAMissingTable(t *testing.T) {
 	// A clock stepped back makes the last check look like the future, which never waits
 	eq(t, Due(f.h.root, time.Now().Add(-time.Hour)), true)
 
-	f.fakes.answer = func(c call) (string, error) {
-		if c.args[0] == "list" {
-			return "table ip filter\ntable inet bugnet\n", nil
-		}
-		return "", nil
-	}
+	f.fakes.answer = listing(bothChains)
 	later := time.Now().Add(2 * time.Minute)
 	reloaded, err := f.h.recheck(t.Context(), later)
 	must(t, err)
 	eq(t, reloaded, false)
-	eq(t, names(f.fakes.take()), []string{"nft list tables"})
+	eq(t, names(f.fakes.take()), []string{"nft list chains inet"})
 	eq(t, Due(f.h.root, later.Add(59*time.Second)), false)
 	eq(t, Due(f.h.root, later.Add(time.Minute)), true)
 
-	f.fakes.answer = func(c call) (string, error) {
-		if c.args[0] == "list" {
-			return "table ip filter\ntable inet bugnetx\n", nil
-		}
-		return "", nil
-	}
+	f.fakes.answer = listing("table inet bugnetx {\n\tchain output {\n\t}\n" +
+		"\tchain forward {\n\t}\n}\n")
 	reloaded, err = f.h.recheck(t.Context(), later.Add(time.Minute))
 	must(t, err)
 	eq(t, reloaded, true)
 	calls := f.fakes.take()
-	eq(t, names(calls), []string{"nft list tables", "nft -f FILE"})
+	eq(t, names(calls), []string{"nft list chains inet", "nft -f FILE"})
 	b, err := os.ReadFile(f.h.root.Path(RulesFile))
 	must(t, err)
 	eq(t, calls[1].stdin, string(b))
+}
+
+// bothChains is how nft lists the chains of the table harden loads
+const bothChains = "table inet bugnet {\n" +
+	"\tchain output {\n\t\ttype filter hook output priority filter; policy accept;\n\t}\n" +
+	"\tchain forward {\n\t\ttype filter hook forward priority filter; policy accept;\n\t}\n}\n"
+
+// listing makes nft list chains as text and succeed at everything else
+func listing(text string) func(call) (string, error) {
+	return func(c call) (string, error) {
+		if c.args[0] == "list" {
+			return text, nil
+		}
+		return "", nil
+	}
+}
+
+func TestRecheckNeedsEveryChainOfTheKeptTable(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t)
+	eq(t, f.run(t), `{"firewall":"nft"}`)
+	f.fakes.take()
+	outputOnly := "table inet bugnet {\n\tchain output {\n\t}\n}\n"
+	for i, c := range []struct {
+		listed string
+		reload bool
+	}{
+		{bothChains, false},
+		{outputOnly, true},
+		{outputOnly + "table inet other {\n\tchain forward {\n\t}\n}\n", true},
+		{"table inet other {\n\tchain output {\n\t}\n\tchain forward {\n\t}\n}\n", true},
+	} {
+		f.fakes.answer = listing(c.listed)
+		reloaded, err := f.h.recheck(t.Context(), time.Now())
+		must(t, err)
+		if reloaded != c.reload {
+			t.Fatalf("listing %d reloaded %v, want %v", i, reloaded, c.reload)
+		}
+		f.fakes.take()
+	}
+
+	// A ruleset kept by a runner without the forward chain is whole with its output chain
+	writeFile(t, f.h.root.Path(RulesFile), nftHeader+"table inet bugnet\n"+
+		"delete table inet bugnet\ntable inet bugnet {\n\tchain output {\n"+
+		"\t\ttype filter hook output priority 0; policy accept;\n\t}\n}\n")
+	f.fakes.answer = listing(outputOnly)
+	reloaded, err := f.h.recheck(t.Context(), time.Now())
+	must(t, err)
+	eq(t, reloaded, false)
+	eq(t, names(f.fakes.take()), []string{"nft list chains inet"})
 }
 
 func TestRecheckIptables(t *testing.T) {

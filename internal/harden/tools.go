@@ -178,12 +178,15 @@ func (h hardener) ipv6() bool {
 type kept struct {
 	firewall string
 	v4, v6   string
+	// chains are checked in place of a fixed list, so a ruleset kept without forward stays whole
+	chains []string
 }
 
 func parseKept(b []byte) (kept, error) {
 	text := string(b)
 	if strings.HasPrefix(text, nftHeader) {
-		return kept{firewall: FirewallNft}, nil
+		chains, _ := bugnetChains(text)
+		return kept{firewall: FirewallNft, chains: chains}, nil
 	}
 	if rest, ok := strings.CutPrefix(text, iptablesHeader); ok {
 		v4, v6, ok := strings.Cut(rest, ipv6Marker)
@@ -194,7 +197,7 @@ func parseKept(b []byte) (kept, error) {
 	return kept{}, errors.New("the kept ruleset names no firewall")
 }
 
-// present reports whether the table the kept ruleset makes is still loaded
+// present reports whether the table the kept ruleset makes is still loaded with every chain
 func (h hardener) present(ctx context.Context, k kept) bool {
 	if k.firewall == FirewallIptables {
 		return h.hooked(ctx, "iptables") && (!h.ipv6() || h.hooked(ctx, "ip6tables"))
@@ -203,17 +206,37 @@ func (h hardener) present(ctx context.Context, k kept) bool {
 	if !ok {
 		return false
 	}
-	out, err := h.tools.run(ctx, nil, nft, "list", "tables")
+	out, err := h.tools.run(ctx, nil, nft, "list", "chains", "inet")
 	if err != nil {
 		return false
 	}
-	sc := bufio.NewScanner(bytes.NewReader(out))
-	for sc.Scan() {
-		if strings.TrimSpace(sc.Text()) == "table inet bugnet" {
-			return true
+	listed, ok := bugnetChains(string(out))
+	if !ok {
+		return false
+	}
+	for _, chain := range k.chains {
+		if !slices.Contains(listed, chain) {
+			return false
 		}
 	}
-	return false
+	return true
+}
+
+// bugnetChains reads the chains of table inet bugnet from nft's text, and whether it has one
+func bugnetChains(text string) ([]string, bool) {
+	var chains []string
+	found, in := false, false
+	sc := bufio.NewScanner(strings.NewReader(text))
+	for sc.Scan() {
+		line := strings.TrimSpace(sc.Text())
+		if strings.HasPrefix(line, "table ") {
+			in = line == "table inet bugnet {"
+			found = found || in
+		} else if name, ok := strings.CutPrefix(line, "chain "); ok && in {
+			chains = append(chains, strings.TrimSuffix(name, " {"))
+		}
+	}
+	return chains, found
 }
 
 func (h hardener) loadKept(ctx context.Context, k kept, path string) error {
