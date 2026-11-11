@@ -170,6 +170,9 @@ func TestContainerHardenTwiceOneTable(t *testing.T) {
 			for _, hook := range []string{"hook output", "hook forward"} {
 				eq(t, strings.Count(chains, hook), 1)
 			}
+			// Forwarded traffic that leaves by no uplink passes, eth0 being the one uplink
+			eq(t, inContainer(t, id, "nft list chain inet bugnet forward | "+
+				"grep -c 'oifname != .*\"eth0\".* accept'"), "1")
 			eq(t, inContainer(t, id, "stat -c '%a %U' /etc/bugnet/firewall.rules"), "644 root")
 			refusedFast(t, id, addr)
 			// The resolver docker hands out sits in a private range, and must still answer
@@ -219,9 +222,10 @@ func TestContainerHardenWithIptables(t *testing.T) {
 				t.Fatalf("a BUGNET chain is empty, with %v lines", once)
 			}
 			for _, tool := range []string{"iptables", "ip6tables"} {
-				for _, chain := range []string{"OUTPUT", "FORWARD"} {
-					eq(t, inContainer(t, id, tool+" -S "+chain+" | grep -c -- '-j BUGNET'"), "1")
-				}
+				eq(t, inContainer(t, id, tool+" -S OUTPUT | grep -- '-j BUGNET'"),
+					"-A OUTPUT -j BUGNET")
+				eq(t, inContainer(t, id, tool+" -S FORWARD | grep -- '-j BUGNET'"),
+					"-A FORWARD -o eth0 -j BUGNET")
 			}
 			refusedFast(t, id, addr)
 			inContainer(t, id, "getent hosts deb.debian.org")
@@ -237,18 +241,33 @@ func TestContainerHardenWithIptables(t *testing.T) {
 	}
 }
 
-// nest runs a command in the nested namespace nestedNamespace makes
-const nest = "ip netns exec nest "
+// nest and nest2 run a command in the nested namespaces nestedNamespace makes
+const (
+	nest  = "ip netns exec nest "
+	nest2 = "ip netns exec nest2 "
+)
 
-// nestedNamespace joins namespace nest to the container by a veth pair, routed out through nat
+// nestedNamespace joins namespace nest to the container by a veth pair and nest2 by bridge nestbr
 func nestedNamespace(t *testing.T, id, nat string) {
 	t.Helper()
 	inContainer(t, id, "ip netns add nest && ip link add nest0 type veth peer name nest1 && "+
 		"ip link set nest1 netns nest && ip addr add 10.200.0.1/24 dev nest0 && "+
 		"ip link set nest0 up && "+nest+"ip addr add 10.200.0.2/24 dev nest1 && "+
 		nest+"ip link set nest1 up && "+nest+"ip link set lo up && "+
-		nest+"ip route add default via 10.200.0.1 && "+nat)
+		nest+"ip route add default via 10.200.0.1 && "+
+		"ip link add nestbr type bridge && ip addr add 10.201.0.1/24 dev nestbr && "+
+		"ip link set nestbr up && ip netns add nest2 && "+
+		"ip link add nest2b type veth peer name nest2a && ip link set nest2b master nestbr && "+
+		"ip link set nest2b up && ip link set nest2a netns nest2 && "+
+		nest2+"ip addr add 10.201.0.2/24 dev nest2a && "+nest2+"ip link set nest2a up && "+
+		nest2+"ip link set lo up && "+nest2+"ip route add default via 10.201.0.1 && "+nat)
+	// A listener in nest that nest2 reaches through the container, never by its uplink
+	docker(t, nil, "exec", "-d", id, "ip", "netns", "exec", "nest", "perl", "-MIO::Socket::INET",
+		"-e", acceptAndClose, "10.200.0.2", "8080")
 }
+
+// inside is a script that connects from nest2 to the listener in nest within 5 s
+const inside = nest2 + "timeout 5 bash -c 'echo > /dev/tcp/10.200.0.2/8080'"
 
 // Docker or a network namespace in the sandbox sends through the forward hook, never output
 func TestContainerHardenForwardsFromANestedNamespace(t *testing.T) {
@@ -259,14 +278,14 @@ func TestContainerHardenForwardsFromANestedNamespace(t *testing.T) {
 		firewall: FirewallNft, pkg: "nftables",
 		nat: "nft add table ip nest && nft 'add chain ip nest post " +
 			"{ type nat hook postrouting priority 100; }' && " +
-			"nft add rule ip nest post ip saddr 10.200.0.0/24 masquerade",
+			"nft 'add rule ip nest post oifname \"eth0\" ip saddr 10.200.0.0/15 masquerade'",
 		list:   "nft list table inet bugnet",
 		unhook: "nft flush chain inet bugnet forward && nft delete chain inet bugnet forward",
 	}, {
 		firewall: FirewallIptables, pkg: "iptables",
-		nat:    "iptables -t nat -A POSTROUTING -s 10.200.0.0/24 -j MASQUERADE",
+		nat:    "iptables -t nat -A POSTROUTING -s 10.200.0.0/15 -o eth0 -j MASQUERADE",
 		list:   "iptables -S && ip6tables -S",
-		unhook: "iptables -D FORWARD -j BUGNET",
+		unhook: "iptables -D FORWARD -o eth0 -j BUGNET",
 	}} {
 		t.Run(c.firewall, func(t *testing.T) {
 			t.Parallel()
@@ -275,9 +294,12 @@ func TestContainerHardenForwardsFromANestedNamespace(t *testing.T) {
 			inContainer(t, id, "apt-get update -qq >/dev/null && DEBIAN_FRONTEND=noninteractive "+
 				"apt-get install -y -qq --no-install-recommends iproute2 "+c.pkg+" >/dev/null")
 			nestedNamespace(t, id, c.nat)
-			if failsInContainer(id, nest+reaches(addr)) {
-				t.Fatalf("the peer at %s is unreachable from the namespace before harden", addr)
+			for _, from := range []string{nest, nest2} {
+				if failsInContainer(id, from+reaches(addr)) {
+					t.Fatalf("the peer at %s is unreachable from %q before harden", addr, from)
+				}
 			}
+			reachesInside(t, id)
 
 			// The second load leaves the rules the first one made
 			var once string
@@ -291,7 +313,10 @@ func TestContainerHardenForwardsFromANestedNamespace(t *testing.T) {
 				}
 				eq(t, rules, once)
 			}
+			// Leaving by the uplink meets the blocks, while traffic between nested networks passes
 			refusedFastFrom(t, id, nest, addr)
+			refusedFastFrom(t, id, nest2, addr)
+			reachesInside(t, id)
 			// The resolver docker hands out sits in a private range, and must still answer
 			inContainer(t, id, nest+"getent hosts deb.debian.org")
 
@@ -303,8 +328,22 @@ func TestContainerHardenForwardsFromANestedNamespace(t *testing.T) {
 			eq(t, inContainer(t, id, "bugnet-run respawn"), `{"started":["firewall"]}`)
 			eq(t, inContainer(t, id, c.list), once)
 			refusedFastFrom(t, id, nest, addr)
+			reachesInside(t, id)
 		})
 	}
+}
+
+// reachesInside fails unless nest2 reaches the listener in nest, waiting while it starts
+func reachesInside(t *testing.T, id string) {
+	t.Helper()
+	for range 25 {
+		if !failsInContainer(id, inside) {
+			return
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	t.Fatalf("nest2 never reached the listener in nest, got %q",
+		inContainer(t, id, inside+" 2>&1; echo $?"))
 }
 
 // userNetwork makes a bridge network whose containers resolve through docker's 127.0.0.11
@@ -326,15 +365,18 @@ func userNetwork(t *testing.T) (name, gateway string) {
 	return name, gateway
 }
 
+// acceptAndClose is a perl script that listens on its address and port and prints ready
+const acceptAndClose = "$| = 1; my $s = IO::Socket::INET->new(LocalAddr => $ARGV[0], " +
+	"LocalPort => $ARGV[1], Listen => 16, ReuseAddr => 1) or die qq(listen: $!\\n); " +
+	"print qq(ready\\n); while (my $c = $s->accept) { close $c }"
+
 // hostListener accepts and closes connections to addr:port in the docker host's namespace
 func hostListener(t *testing.T, addr string, port int) {
 	t.Helper()
 	// No capability, so the host's own firewall stays out of reach
 	id := docker(t, nil, "run", "-d", "--rm", "--network", "host", "--cap-drop", "ALL",
-		"ubuntu:24.04", "perl", "-MIO::Socket::INET", "-e", "$| = 1; "+
-			"my $s = IO::Socket::INET->new(LocalAddr => $ARGV[0], LocalPort => $ARGV[1], "+
-			"Listen => 16, ReuseAddr => 1) or die qq(listen: $!\\n); print qq(ready\\n); "+
-			"while (my $c = $s->accept) { close $c }", addr, strconv.Itoa(port))
+		"ubuntu:24.04", "perl", "-MIO::Socket::INET", "-e", acceptAndClose, addr,
+		strconv.Itoa(port))
 	t.Cleanup(func() { _ = exec.Command("docker", "kill", id).Run() })
 	for range 50 {
 		if docker(t, nil, "logs", id) == "ready" {
