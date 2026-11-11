@@ -306,7 +306,15 @@ Every entry of `deny_ranges`, `pools` and `allow` is a CIDR or a bare address. `
 most 10,000 entries, the others at most 1,000 and `mail_ports` at most 64. `no_gateway` is for a
 provider whose default gateway is its own host, and it is false when left out.
 
-The rules apply to outbound traffic only. These are allowed first, in this order:
+The rules apply to traffic that leaves the sandbox: its own outbound traffic, and what it forwards
+for Docker or a nested namespace out of an uplink. An uplink is a device that carries a default
+route in `/proc/net/route` or `/proc/net/ipv6_route` when `harden` runs. Forwarded traffic that
+leaves by another device, such as a port published into a nested container or traffic between two
+nested networks, is accepted before the blocks. When no default route names a device, a device
+name is not letters, digits, `_`, `.` and `-` with no `.` or `-` first, or there are more than 16
+uplinks, every forwarded packet meets the blocks.
+
+These are allowed first, in this order:
 
 - Loopback, and established or related traffic.
 - TCP and UDP port 53 of each `nameserver` in `/etc/resolv.conf` and
@@ -327,16 +335,20 @@ fails at once as refused or unreachable. A dropped one would hang until the clie
    `apt-get install -y --no-install-recommends nftables`, within 60 s for both. This runs before
    the sandbox lock.
 2. With `nft`, it loads one table, `inet bugnet`, with `nft -f`. The file adds the table, deletes
-   it and makes it again in one transaction, so a second run leaves one table. Pools sit in the
-   interval sets `pools4` and `pools6`, with prefixes inside others left out.
+   it and makes it again in one transaction, so a second run leaves one table. Its `output` and
+   `forward` chains hold the same rules, and `forward` first accepts `oifname != { "eth0" }`
+   with the uplinks named. Pools sit in the interval sets `pools4` and `pools6`, with prefixes
+   inside others left out.
 3. Without `nft`, or when `nft` fails, it refills a `BUGNET` chain with `iptables-restore
-   --noflush` and `ip6tables-restore --noflush`, and makes `OUTPUT` jump to it once. Without IPv6
+   --noflush` and `ip6tables-restore --noflush`, and adds each jump to it once: from `OUTPUT`, and
+   from `FORWARD` with `-o` for each uplink, or with no `-o` when it found none. Without IPv6
    in the kernel (no `/proc/net/if_inet6`), an IPv6 failure is ignored. Any other IPv6 failure
    puts back the IPv4 chain that `/etc/bugnet/firewall.rules` keeps, or empties it when that file
    holds no iptables ruleset. So both families load, or neither does.
 4. It keeps what loaded in `/etc/bugnet/firewall.rules` (0644), renamed into place only after the
    load. Its first line names the tool, `# bugnet-run harden nft` or `# bugnet-run harden
-   iptables`. The iptables file holds the IPv4 input, a `# ipv6` line and the IPv6 input.
+   iptables`. The iptables file holds a `# uplinks eth0` line when it found uplinks, the IPv4
+   input, a `# ipv6` line and the IPv6 input.
 
 It prints `{"firewall":"nft"}` or `{"firewall":"iptables"}` and exits 0. On an error it prints
 one of these and exits 1:
@@ -399,8 +411,9 @@ under this root, standing alone. So a pid reused by another process, or once hel
 local root's service, never counts.
 
 It also puts the firewall back. When `/etc/bugnet/firewall.rules` exists and the last check is a
-minute old or more, it checks that the table is loaded: `nft list tables` shows `table inet
-bugnet`, or `iptables -w -C OUTPUT -j BUGNET` and its IPv6 twin pass. When the table is gone it
+minute old or more, it checks that the table is loaded: `nft list chains inet` shows each chain
+of the kept table, or `iptables -w -C` and its IPv6 twin find each jump to `BUGNET`, the
+`FORWARD` ones by the uplinks the kept file names. When the table or a jump is gone it
 loads the file again, and `started` holds `firewall`. Each check touches
 `/run/bugnet/firewall.checked`, as `harden` does, so `start` calls sudo for it at most once a
 minute. Root can still remove the table between jobs.
