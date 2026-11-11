@@ -123,10 +123,16 @@ func reaches(addr string) string {
 // refusedFast fails unless every blocked kind of connect fails within 1 s, not at a timeout
 func refusedFast(t *testing.T, id, peer string) {
 	t.Helper()
+	refusedFastFrom(t, id, "", peer)
+}
+
+// refusedFastFrom runs each connect behind the command prefix from, such as nest
+func refusedFastFrom(t *testing.T, id, from, peer string) {
+	t.Helper()
 	// The peer is in a private range, 25 is a mail port and 198.51.100.0/24 is the spec's pool
 	for _, dest := range []string{peer + "/29417", "192.0.2.1/25", "198.51.100.7/80"} {
-		got := inContainer(t, id, "out=$(timeout 1 bash -c 'echo > /dev/tcp/"+dest+"' 2>&1); "+
-			"echo \"$? $out\"")
+		got := inContainer(t, id, "out=$("+from+"timeout 1 bash -c 'echo > /dev/tcp/"+dest+
+			"' 2>&1); echo \"$? $out\"")
 		if !strings.HasPrefix(got, "1 ") || !strings.Contains(got, "Connection refused") {
 			t.Fatalf("a connect to %s gave %q, want a refusal within 1 s", dest, got)
 		}
@@ -152,6 +158,10 @@ func TestContainerHardenTwiceOneTable(t *testing.T) {
 				eq(t, code, 0)
 			}
 			eq(t, strings.Count(inContainer(t, id, "nft list tables"), "table inet bugnet"), 1)
+			chains := inContainer(t, id, "nft list chains inet")
+			for _, hook := range []string{"hook output", "hook forward"} {
+				eq(t, strings.Count(chains, hook), 1)
+			}
 			eq(t, inContainer(t, id, "stat -c '%a %U' /etc/bugnet/firewall.rules"), "644 root")
 			refusedFast(t, id, addr)
 			// The resolver docker hands out sits in a private range, and must still answer
@@ -198,7 +208,9 @@ func TestContainerHardenWithIptables(t *testing.T) {
 				t.Fatalf("a BUGNET chain is empty, with %v lines", once)
 			}
 			for _, tool := range []string{"iptables", "ip6tables"} {
-				eq(t, inContainer(t, id, tool+" -S OUTPUT | grep -c -- '-j BUGNET'"), "1")
+				for _, chain := range []string{"OUTPUT", "FORWARD"} {
+					eq(t, inContainer(t, id, tool+" -S "+chain+" | grep -c -- '-j BUGNET'"), "1")
+				}
 			}
 			refusedFast(t, id, addr)
 			inContainer(t, id, "getent hosts deb.debian.org")
@@ -208,6 +220,76 @@ func TestContainerHardenWithIptables(t *testing.T) {
 			eq(t, inContainer(t, id, "bugnet-run respawn"), `{"started":["firewall"]}`)
 			eq(t, inContainer(t, id, "iptables -S OUTPUT | grep -c -- '-j BUGNET'"), "1")
 			refusedFast(t, id, addr)
+		})
+	}
+}
+
+// nest runs a command in the nested namespace nestedNamespace makes
+const nest = "ip netns exec nest "
+
+// nestedNamespace joins namespace nest to the container by a veth pair, routed out through nat
+func nestedNamespace(t *testing.T, id, nat string) {
+	t.Helper()
+	inContainer(t, id, "ip netns add nest && ip link add nest0 type veth peer name nest1 && "+
+		"ip link set nest1 netns nest && ip addr add 10.200.0.1/24 dev nest0 && "+
+		"ip link set nest0 up && "+nest+"ip addr add 10.200.0.2/24 dev nest1 && "+
+		nest+"ip link set nest1 up && "+nest+"ip link set lo up && "+
+		nest+"ip route add default via 10.200.0.1 && "+nat)
+}
+
+// Docker or a network namespace in the sandbox sends through the forward hook, never output
+func TestContainerHardenForwardsFromANestedNamespace(t *testing.T) {
+	needDocker(t)
+	bin := linuxBuild(t)
+	spec := defaultSpecJSON(t)
+	for _, c := range []struct{ firewall, pkg, nat, list, unhook string }{{
+		firewall: FirewallNft, pkg: "nftables",
+		nat: "nft add table ip nest && nft 'add chain ip nest post " +
+			"{ type nat hook postrouting priority 100; }' && " +
+			"nft add rule ip nest post ip saddr 10.200.0.0/24 masquerade",
+		list:   "nft list table inet bugnet",
+		unhook: "nft flush chain inet bugnet forward && nft delete chain inet bugnet forward",
+	}, {
+		firewall: FirewallIptables, pkg: "iptables",
+		nat:    "iptables -t nat -A POSTROUTING -s 10.200.0.0/24 -j MASQUERADE",
+		list:   "iptables -S && ip6tables -S",
+		unhook: "iptables -D FORWARD -j BUGNET",
+	}} {
+		t.Run(c.firewall, func(t *testing.T) {
+			t.Parallel()
+			addr := peer(t, "ubuntu:24.04", bin)
+			id := hardenContainer(t, "ubuntu:24.04", bin, "--privileged")
+			inContainer(t, id, "apt-get update -qq >/dev/null && DEBIAN_FRONTEND=noninteractive "+
+				"apt-get install -y -qq --no-install-recommends iproute2 "+c.pkg+" >/dev/null")
+			nestedNamespace(t, id, c.nat)
+			if failsInContainer(id, nest+reaches(addr)) {
+				t.Fatalf("the peer at %s is unreachable from the namespace before harden", addr)
+			}
+
+			// The second load leaves the rules the first one made
+			var once string
+			for i := range 2 {
+				out, code := containerHarden(t, id, spec)
+				eq(t, out, `{"firewall":"`+c.firewall+`"}`)
+				eq(t, code, 0)
+				rules := inContainer(t, id, c.list)
+				if i == 0 {
+					once = rules
+				}
+				eq(t, rules, once)
+			}
+			refusedFastFrom(t, id, nest, addr)
+			// The resolver docker hands out sits in a private range, and must still answer
+			inContainer(t, id, nest+"getent hosts deb.debian.org")
+
+			// Only the forward hook stands between the namespace and the peer
+			inContainer(t, id, c.unhook+" && touch -d '2 minutes ago' /run/bugnet/firewall.checked")
+			if failsInContainer(id, nest+reaches(addr)) {
+				t.Fatalf("the peer at %s is unreachable with the forward hook gone", addr)
+			}
+			eq(t, inContainer(t, id, "bugnet-run respawn"), `{"started":["firewall"]}`)
+			eq(t, inContainer(t, id, c.list), once)
+			refusedFastFrom(t, id, nest, addr)
 		})
 	}
 }
