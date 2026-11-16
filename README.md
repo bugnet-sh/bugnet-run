@@ -73,6 +73,45 @@ controller, or on a kernel before 5.19, has no `memory.peak`, so its job reports
 `io_*` fields come only from a cgroup. A command that never started has no `stats` file. Jobs
 that run as a user other than root cannot make cgroups, so they always take `rusage`.
 
+### Other job commands
+
+- `ls [--dir DIR]` prints one JSON line per job: `job`, `state`, `code` once exited, and the
+  output offsets `o` and `e`.
+- `cancel --job <id> [--dir DIR]` stops the job's process group and returns silently.
+- `supervise` is internal. `start` runs it detached; it runs the command and writes the job's
+  stats, `exit` file and supervisor pid. Do not call it by hand.
+- `ping` writes one `pong` frame, to check that the runner answers.
+
+## Frames
+
+`start`, `attach` and failures write frames on stdout. A frame is one JSON object on one line,
+ended by `\n`, and written in a single write. The format is in `frame/frame.go`.
+
+| Field | Key | Used by | Meaning |
+|---|---|---|---|
+| Kind | `t` | all | The frame kind, below |
+| Offset | `off` | `o`, `e` | Byte offset of `d` in that output |
+| Data | `d` | `o`, `e` | Output bytes, base64 in JSON |
+| Code | `code` | `x` | Exit code of the job; 128 plus the signal if one ended it |
+| Out, Err | `o`, `e` | `skip` | Offsets at which stdout and stderr go on |
+| Reason | `reason` | `err` | Why the command failed, below |
+| OOM | `oom` | `x` | True if the kernel killed a process of the job for want of memory |
+| PeakMiB | `pk` | `x` | Peak memory of the job in MiB, rounded up |
+
+| Kind | `t` | Meaning |
+|---|---|---|
+| Stdout | `o` | Bytes of standard output |
+| Stderr | `e` | Bytes of standard error |
+| Heartbeat | `h` | Sent while a job runs and is quiet; the default gap is 10 s |
+| Exit | `x` | The job ended |
+| Error | `err` | The command failed; `reason` says why |
+| Pong | `pong` | Answer to `ping` |
+| Skip | `skip` | With `--tail`, output goes on at offsets `o` and `e` |
+
+Error reasons are `job_exists`, `job_not_found`, `bad_args`, `spawn_failed` and `job_lost`.
+Reading the stream again from known offsets with `attach` loses no bytes, because the job's files
+keep all output.
+
 ## Sandbox services
 
 These run as root. `--root DIR` maps every sandbox path under `DIR`, for the `local` provider.
