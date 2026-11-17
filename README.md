@@ -154,8 +154,13 @@ The `ca` values:
 
 With `"phase": "pool"` only steps 0, 2 and 3 run. The spec needs no gate key or listen address,
 the answer has no `gate`, and the gate, its files and the sampler wait for the full phase that
-claims the sandbox. Without `phase`, every step runs. Before step 5 a full phase loads the kept
-firewall rules again when their table is gone, as a hibernated sandbox may lose it.
+claims the sandbox. Without `phase`, every step runs. Before step 4 the full and `nogate` phases
+load the kept firewall rules again when their table is gone, as a hibernated sandbox may lose it.
+
+With `"phase": "nogate"` every step but 1 and 5 runs, for a sandbox that never has a gate, such
+as one on a provider with its own sshd. The spec must leave out `gate_key` and `gate_listen`, and
+`--repair` refuses it, both as `bad_spec`. The answer has no `gate`. With no
+`/etc/bugnet/gate.json`, neither `respawn` nor `start` ever starts a gate.
 
 A second run with the same spec changes nothing and keeps the same gate process. A new key or
 config restarts the gate. `--repair` redoes only steps 1, 4 and 5. Without `--spec`, it keeps the
@@ -333,19 +338,29 @@ when the spec or an argument after `--spec` is wrong:
 
 ```json
 {"v": 1, "mail_ports": [25, 465, 587], "deny_ranges": ["10.0.0.0/8", "fe80::/10"],
- "pools": ["198.51.100.0/24"], "allow": ["203.0.113.7"]}
+ "pools": ["198.51.100.0/24"], "allow": ["203.0.113.7"], "no_gateway": false}
 ```
 
 Every entry of `deny_ranges`, `pools` and `allow` is a CIDR or a bare address. `pools` holds at
-most 10,000 entries, the others at most 1,000 and `mail_ports` at most 64.
+most 10,000 entries, the others at most 1,000 and `mail_ports` at most 64. `no_gateway` is for a
+provider whose default gateway is its own host, and it is false when left out.
 
-The rules apply to outbound traffic only. These are allowed first, in this order:
+The rules apply to traffic that leaves the sandbox: its own outbound traffic, and what it forwards
+for Docker or a nested namespace out of an uplink. An uplink is a device that carries a default
+route in `/proc/net/route` or `/proc/net/ipv6_route` when `harden` runs. Forwarded traffic that
+leaves by another device, such as a port published into a nested container or traffic between two
+nested networks, is accepted before the blocks. When no default route names a device, a device
+name is not letters, digits, `_`, `.` and `-` with no `.` or `-` first, or there are more than 16
+uplinks, every forwarded packet meets the blocks.
+
+These are allowed first, in this order:
 
 - Loopback, and established or related traffic.
 - TCP and UDP port 53 of each `nameserver` in `/etc/resolv.conf` and
   `/run/systemd/resolve/resolv.conf`, so a resolver in `10.0.0.0/8` keeps working.
 - The next hop of each default route in `/proc/net/route` and `/proc/net/ipv6_route`, the
-  default gateway even in a private range.
+  default gateway even in a private range. With `no_gateway` true the gateway gets no accept and
+  falls under `deny_ranges` like any other address, while a resolver there keeps port 53.
 - DHCP renewals (UDP 68 to 67, and 546 to 547), and IPv6 neighbour solicitations, neighbour
   adverts and router solicitations, so the lease and IPv6 routing survive the blocks.
 - Each `allow` entry, the provider's own control addresses.
@@ -359,16 +374,20 @@ fails at once as refused or unreachable. A dropped one would hang until the clie
    `apt-get install -y --no-install-recommends nftables`, within 60 s for both. This runs before
    the sandbox lock.
 2. With `nft`, it loads one table, `inet bugnet`, with `nft -f`. The file adds the table, deletes
-   it and makes it again in one transaction, so a second run leaves one table. Pools sit in the
-   interval sets `pools4` and `pools6`, with prefixes inside others left out.
+   it and makes it again in one transaction, so a second run leaves one table. Its `output` and
+   `forward` chains hold the same rules, and `forward` first accepts `oifname != { "eth0" }`
+   with the uplinks named. Pools sit in the interval sets `pools4` and `pools6`, with prefixes
+   inside others left out.
 3. Without `nft`, or when `nft` fails, it refills a `BUGNET` chain with `iptables-restore
-   --noflush` and `ip6tables-restore --noflush`, and makes `OUTPUT` jump to it once. Without IPv6
+   --noflush` and `ip6tables-restore --noflush`, and adds each jump to it once: from `OUTPUT`, and
+   from `FORWARD` with `-o` for each uplink, or with no `-o` when it found none. Without IPv6
    in the kernel (no `/proc/net/if_inet6`), an IPv6 failure is ignored. Any other IPv6 failure
    puts back the IPv4 chain that `/etc/bugnet/firewall.rules` keeps, or empties it when that file
    holds no iptables ruleset. So both families load, or neither does.
 4. It keeps what loaded in `/etc/bugnet/firewall.rules` (0644), renamed into place only after the
    load. Its first line names the tool, `# bugnet-run harden nft` or `# bugnet-run harden
-   iptables`. The iptables file holds the IPv4 input, a `# ipv6` line and the IPv6 input.
+   iptables`. The iptables file holds a `# uplinks eth0` line when it found uplinks, the IPv4
+   input, a `# ipv6` line and the IPv6 input.
 
 It prints `{"firewall":"nft"}` or `{"firewall":"iptables"}` and exits 0. On an error it prints
 one of these and exits 1:
@@ -431,8 +450,9 @@ under this root, standing alone. So a pid reused by another process, or once hel
 local root's service, never counts.
 
 It also puts the firewall back. When `/etc/bugnet/firewall.rules` exists and the last check is a
-minute old or more, it checks that the table is loaded: `nft list tables` shows `table inet
-bugnet`, or `iptables -w -C OUTPUT -j BUGNET` and its IPv6 twin pass. When the table is gone it
+minute old or more, it checks that the table is loaded: `nft list chains inet` shows each chain
+of the kept table, or `iptables -w -C` and its IPv6 twin find each jump to `BUGNET`, the
+`FORWARD` ones by the uplinks the kept file names. When the table or a jump is gone it
 loads the file again, and `started` holds `firewall`. Each check touches
 `/run/bugnet/firewall.checked`, as `harden` does, so `start` calls sudo for it at most once a
 minute. Root can still remove the table between jobs.

@@ -287,7 +287,7 @@ func TestStartChecksTheFirewallThroughSudo(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	same(t, string(calls), "list tables\n-f "+rules+"\n")
+	same(t, string(calls), "list chains inet\n-f "+rules+"\n")
 
 	// Within the minute a healthy sandbox needs no sudo
 	again := s.sudo(t, "sudo", "shift\nexec \"$@\"\n")
